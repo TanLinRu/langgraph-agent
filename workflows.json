@@ -1,0 +1,353 @@
+[
+  {
+    "id": "wf-code-review-pipeline",
+    "name": "代码审查流水线",
+    "description": "自动化代码审查工作流：先进行代码质量检查，然后安全审计，最后生成文档",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "code_review",
+          "label": "代码质量审查",
+          "description": "检查代码风格、潜在 bug、性能问题"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "skill",
+        "data": {
+          "skill": "security_audit",
+          "label": "安全审计",
+          "description": "OWASP Top 10 检查、输入验证、认证授权"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "skill": "documentation",
+          "label": "生成审查报告",
+          "description": "生成完整的代码审查文档"
+        },
+        "position": { "x": 700, "y": 100 }
+      },
+      {
+        "id": "node-4",
+        "type": "dispatch",
+        "data": {
+          "label": "分发到 CLI 执行",
+          "cli": "opencode",
+          "mode": "run"
+        },
+        "position": { "x": 1000, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" },
+      { "id": "edge-3", "source": "node-3", "target": "node-4" }
+    ],
+    "created_at": "2026-05-02 10:00:00",
+    "updated_at": "2026-05-02 10:00:00"
+  },
+  {
+    "id": "wf-feature-development",
+    "name": "新功能开发流程",
+    "description": "从 API 设计到数据库设计，再到代码实现和测试的完整开发流程",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "api_design",
+          "label": "API 设计",
+          "description": "设计 RESTful API，生成 OpenAPI 规范"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "skill",
+        "data": {
+          "skill": "database_design",
+          "label": "数据库设计",
+          "description": "表结构设计、索引策略、迁移方案"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "dispatch",
+        "data": {
+          "label": "代码实现",
+          "cli": "opencode",
+          "mode": "run",
+          "task_template": "根据 API 设计和数据库设计实现功能"
+        },
+        "position": { "x": 700, "y": 100 }
+      },
+      {
+        "id": "node-4",
+        "type": "skill",
+        "data": {
+          "skill": "testing",
+          "label": "测试编写",
+          "description": "编写单元测试和集成测试"
+        },
+        "position": { "x": 1000, "y": 100 }
+      },
+      {
+        "id": "node-5",
+        "type": "skill",
+        "data": {
+          "skill": "documentation",
+          "label": "文档生成",
+          "description": "生成技术文档和使用说明"
+        },
+        "position": { "x": 1300, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" },
+      { "id": "edge-3", "source": "node-3", "target": "node-4" },
+      { "id": "edge-4", "source": "node-4", "target": "node-5" }
+    ],
+    "created_at": "2026-05-02 10:30:00",
+    "updated_at": "2026-05-02 10:30:00"
+  },
+  {
+    "id": "wf-performance-optimization",
+    "name": "性能优化工作流",
+    "description": "性能分析、优化实施、基准测试对比的完整流程",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "performance_optimization",
+          "label": "性能分析",
+          "description": "Profiling、火焰图分析、瓶颈识别"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "dispatch",
+        "data": {
+          "label": "优化实施",
+          "cli": "opencode",
+          "mode": "run",
+          "task_template": "根据性能分析结果实施优化"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "skill": "testing",
+          "label": "回归测试",
+          "description": "确保优化未破坏现有功能"
+        },
+        "position": { "x": 700, "y": 100 }
+      },
+      {
+        "id": "node-4",
+        "type": "skill",
+        "data": {
+          "skill": "code_review",
+          "label": "代码审查",
+          "description": "审查优化后的代码质量"
+        },
+        "position": { "x": 1000, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" },
+      { "id": "edge-3", "source": "node-3", "target": "node-4" }
+    ],
+    "created_at": "2026-05-02 11:00:00",
+    "updated_at": "2026-05-02 11:00:00"
+  },
+  {
+    "id": "wf-bug-fix-pipeline",
+    "name": "Bug 修复流水线",
+    "description": "问题诊断、修复、测试验证的完整流程",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "debugging",
+          "label": "问题诊断",
+          "description": "复现问题、定位根因、日志分析"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "dispatch",
+        "data": {
+          "label": "修复实施",
+          "cli": "opencode",
+          "mode": "run",
+          "task_template": "根据根因分析实施修复"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "skill": "testing",
+          "label": "测试验证",
+          "description": "编写测试用例验证修复"
+        },
+        "position": { "x": 700, "y": 100 }
+      },
+      {
+        "id": "node-4",
+        "type": "skill",
+        "data": {
+          "skill": "code_review",
+          "label": "代码审查",
+          "description": "审查修复代码"
+        },
+        "position": { "x": 1000, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" },
+      { "id": "edge-3", "source": "node-3", "target": "node-4" }
+    ],
+    "created_at": "2026-05-02 11:30:00",
+    "updated_at": "2026-05-02 11:30:00"
+  },
+  {
+    "id": "wf-refactoring-pipeline",
+    "name": "代码重构流水线",
+    "description": "代码重构、测试保障、质量检查的完整流程",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "code_review",
+          "label": "代码分析",
+          "description": "识别代码异味、技术债"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "skill",
+        "data": {
+          "skill": "testing",
+          "label": "补充测试",
+          "description": "确保有足够测试覆盖再重构"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "dispatch",
+        "data": {
+          "label": "重构实施",
+          "cli": "opencode",
+          "mode": "run",
+          "task_template": "根据代码分析结果进行重构"
+        },
+        "position": { "x": 700, "y": 100 }
+      },
+      {
+        "id": "node-4",
+        "type": "skill",
+        "data": {
+          "skill": "testing",
+          "label": "回归测试",
+          "description": "验证重构未破坏功能"
+        },
+        "position": { "x": 1000, "y": 100 }
+      },
+      {
+        "id": "node-5",
+        "type": "skill",
+        "data": {
+          "skill": "documentation",
+          "label": "更新文档",
+          "description": "更新架构文档和代码注释"
+        },
+        "position": { "x": 1300, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" },
+      { "id": "edge-3", "source": "node-3", "target": "node-4" },
+      { "id": "edge-4", "source": "node-4", "target": "node-5" }
+    ],
+    "created_at": "2026-05-02 12:00:00",
+    "updated_at": "2026-05-02 12:00:00"
+  },
+  {
+    "id": "wf-data-analysis-pipeline",
+    "name": "数据分析流水线",
+    "description": "数据清洗、分析、可视化、报告生成的完整流程",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "data_analysis",
+          "label": "数据探索",
+          "description": "数据结构查看、缺失值识别"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "dispatch",
+        "data": {
+          "label": "数据清洗",
+          "cli": "opencode",
+          "mode": "run",
+          "task_template": "根据数据探索结果清洗数据"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "skill": "data_analysis",
+          "label": "数据分析",
+          "description": "统计分析、相关性分析"
+        },
+        "position": { "x": 700, "y": 100 }
+      },
+      {
+        "id": "node-4",
+        "type": "skill",
+        "data": {
+          "skill": "documentation",
+          "label": "生成报告",
+          "description": "生成数据分析报告"
+        },
+        "position": { "x": 1000, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" },
+      { "id": "edge-3", "source": "node-3", "target": "node-4" }
+    ],
+    "created_at": "2026-05-02 12:30:00",
+    "updated_at": "2026-05-02 12:30:00"
+  }
+]

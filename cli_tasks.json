@@ -1,0 +1,17 @@
+[
+  {
+    "id": "1777701104404",
+    "cli_name": "opencode",
+    "task": "生成架构图",
+    "working_dir": "D:\\project\\demo",
+    "mode": "serve",
+    "result": {
+      "status": "success",
+      "serve_id": "opencode-7296",
+      "pid": 7296,
+      "cli_name": "opencode",
+      "working_dir": "D:\\project\\demo"
+    },
+    "created_at": "2026-05-02 13:51:44"
+  }
+]
