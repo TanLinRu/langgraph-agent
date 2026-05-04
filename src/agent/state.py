@@ -1,6 +1,8 @@
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Optional
 import operator
 from datetime import datetime
+
+from langgraph.graph import MessagesState
 
 
 class AgentState(TypedDict):
@@ -32,3 +34,8 @@ def create_initial_state(thread_id: str = "default") -> AgentState:
         "sop_name": None,
         "sop_step": None,
     }
+
+
+class SubAgentState(MessagesState):
+    """Sub-agent 共享状态，用于 supervisor 模式下的多代理协作。"""
+    task_description: Optional[str] = None

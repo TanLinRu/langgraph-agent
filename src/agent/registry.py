@@ -223,6 +223,14 @@ class AgentRegistry:
         
         graph_id = graph_data.get("id") or f"graph-{len(graphs)+1}-{int(datetime.now().timestamp())}"
         
+        config = graph_data.get("config", {})
+        if "supervisor_config" not in config:
+            config["supervisor_config"] = {
+                "routing_strategy": "llm",
+                "max_iterations": 10,
+                "supervisor_prompt": None,
+            }
+
         new_graph = {
             "id": graph_id,
             "name": graph_data.get("name", "未命名 Graph"),
@@ -230,7 +238,7 @@ class AgentRegistry:
             "nodes": graph_data.get("nodes", []),
             "edges": graph_data.get("edges", []),
             "parallel_groups": graph_data.get("parallel_groups", []),
-            "config": graph_data.get("config", {}),
+            "config": config,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }

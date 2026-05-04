@@ -28,6 +28,7 @@ from src.agent.skills import SKILLS_REGISTRY, get_skill, SKILLS_INDEX
 from src.agent.tools import TOOLS
 from src.agent.registry import get_registry
 from src.agent.orchestrator import get_orchestrator
+from src.agent.supervisor import get_supervisor_manager, SupervisorManager
 from src.agent.event_bus import get_event_bus, ExecutionEvent
 from src.agent.sop_state import (
     list_state_files,
@@ -106,7 +107,11 @@ async def lifespan(app: FastAPI):
     # 初始化 Agent 注册表
     registry = get_registry(memory_dir=config.long_term.memory_dir)
     orchestrator = get_orchestrator(registry, agent.llm)
-    logger.info("Agent Registry 和 Orchestrator 已初始化")
+
+    # 初始化 Supervisor Manager
+    supervisor_mgr = get_supervisor_manager(registry, agent.llm, TOOLS)
+    app.state.supervisor_mgr = supervisor_mgr
+    logger.info("Agent Registry, Orchestrator 和 SupervisorManager 已初始化")
     
     yield
     if agent:
@@ -654,12 +659,19 @@ class ExecutionPlanRequest(BaseModel):
 
 @app.post("/api/execution/plan")
 async def generate_execution_plan(req: ExecutionPlanRequest):
-    """生成执行计划"""
+    """生成执行计划（优先使用 SupervisorManager，回退到 legacy orchestrator）"""
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if supervisor_mgr:
+        plan = supervisor_mgr.generate_plan(req.graph_id, req.input_text)
+        if plan:
+            return plan
+
+    # 回退到 legacy orchestrator
     orchestrator = get_orchestrator()
     plan = orchestrator.generate_plan(req.graph_id, req.input_text)
     if not plan:
         raise HTTPException(status_code=400, detail="Failed to generate plan")
-    
+
     return {
         "graph_id": plan.graph_id,
         "input_summary": plan.input_summary,
@@ -680,31 +692,77 @@ class ExecutionRunRequest(BaseModel):
 
 @app.post("/api/execution/run")
 async def run_execution(req: ExecutionRunRequest):
-    """执行 Graph"""
+    """执行 Graph（优先使用 SupervisorManager，回退到 legacy orchestrator）"""
     global agent
     if not req.approved:
         return {
             "status": "pending_approval",
             "message": "等待用户批准执行计划"
         }
-    
+
+    # 优先使用 SupervisorManager
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if supervisor_mgr and agent and agent.llm:
+        try:
+            result = await supervisor_mgr.run(
+                req.graph_id, req.input_text, thread_id="default"
+            )
+            return {
+                "execution_id": result["execution_id"],
+                "status": result["status"],
+                "output": result.get("output"),
+            }
+        except Exception as e:
+            logger.warning(f"[Execution] Supervisor failed, falling back to legacy: {e}")
+
+    # 回退到 legacy orchestrator
     orchestrator = get_orchestrator()
     execution = orchestrator.create_execution(req.graph_id, req.input_text)
     if not execution:
         raise HTTPException(status_code=400, detail="Failed to create execution")
-    
-    # 执行
+
     if agent and agent.llm:
         await orchestrator.run_execution(execution.execution_id, agent.llm, TOOLS)
-    
-    # 返回更新后的状态
+
     state = orchestrator.get_execution(execution.execution_id)["state"]
-    
+
     return {
         "execution_id": execution.execution_id,
         "status": state.status,
         "output": state.output,
     }
+
+
+@app.post("/api/execution/run/stream")
+async def run_execution_stream(req: ExecutionRunRequest):
+    """流式执行 Graph（SSE）"""
+    if not req.approved:
+        return {
+            "status": "pending_approval",
+            "message": "等待用户批准执行计划"
+        }
+
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if not supervisor_mgr:
+        raise HTTPException(status_code=400, detail="SupervisorManager not available")
+
+    async def sse_generator():
+        async for event in supervisor_mgr.stream_run(
+            req.graph_id, req.input_text, thread_id="default"
+        ):
+            event_type = event.get("type", "message")
+            data = json.dumps(event, ensure_ascii=False)
+            yield f"event: {event_type}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Legacy workflow execution (for backwards compatibility)
@@ -747,12 +805,39 @@ async def execute_legacy_workflow(req: LegacyWorkflowRequest):
 
 @app.get("/api/execution/{execution_id}/state")
 async def get_execution_state(execution_id: str):
-    """获取执行状态"""
+    """获取执行状态（支持 supervisor 和 legacy orchestrator）"""
+    # 先查 supervisor
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if supervisor_mgr:
+        sup_state = supervisor_mgr.get_execution(execution_id)
+        if sup_state:
+            return {
+                "execution_id": sup_state.execution_id,
+                "graph_id": sup_state.graph_id,
+                "status": sup_state.status,
+                "current_step": None,
+                "total_llm_calls": sup_state.total_llm_calls,
+                "total_cost_usd": sup_state.total_cost_usd,
+                "elapsed_ms": sup_state.elapsed_ms,
+                "steps": [
+                    {
+                        "step_id": i + 1,
+                        "agent_id": name,
+                        "agent_name": name,
+                        "status": sup_state.status,
+                        "llm_calls": 0,
+                        "tool_calls": 0,
+                    }
+                    for i, name in enumerate(sup_state.agent_names)
+                ],
+            }
+
+    # 回退到 legacy orchestrator
     orchestrator = get_orchestrator()
     exec_data = orchestrator.get_execution(execution_id)
     if not exec_data:
         raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
-    
+
     state = exec_data["state"]
     return {
         "execution_id": state.execution_id,
@@ -772,20 +857,72 @@ async def get_execution_state(execution_id: str):
                 "tool_calls": len(s.tool_calls),
             }
             for s in state.steps
-        ]
+        ],
     }
 
 
 @app.get("/api/executions")
 async def list_executions():
-    """列出所有执行"""
+    """列出所有执行（包括 supervisor 和 legacy）"""
+    executions = []
+
+    # Supervisor executions
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if supervisor_mgr:
+        executions.extend(supervisor_mgr.list_executions())
+
+    # Legacy orchestrator executions
     orchestrator = get_orchestrator()
-    return {"executions": orchestrator.list_executions()}
+    executions.extend(orchestrator.list_executions())
+
+    return {"executions": executions}
 
 
 @app.get("/api/execution/{execution_id}/report")
 async def get_execution_report(execution_id: str):
-    """获取执行完成后的详细报告"""
+    """获取执行完成后的详细报告（支持 supervisor 和 legacy）"""
+    # 先查 supervisor
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if supervisor_mgr:
+        sup_state = supervisor_mgr.get_execution(execution_id)
+        if sup_state:
+            return {
+                "execution_id": sup_state.execution_id,
+                "graph_id": sup_state.graph_id,
+                "status": sup_state.status,
+                "input": sup_state.input_text[:100],
+                "output": sup_state.output[:500] if sup_state.output else None,
+                "summary": {
+                    "total_steps": len(sup_state.agent_names),
+                    "completed_steps": len(sup_state.agent_names) if sup_state.status == "completed" else 0,
+                    "failed_steps": 1 if sup_state.status == "failed" else 0,
+                    "total_llm_calls": sup_state.total_llm_calls,
+                    "total_tokens": sup_state.total_tokens,
+                    "total_cost_usd": sup_state.total_cost_usd,
+                    "total_duration_ms": sup_state.elapsed_ms,
+                },
+                "step_details": [
+                    {
+                        "step_id": i + 1,
+                        "agent_name": name,
+                        "status": sup_state.status,
+                        "llm_calls": 0,
+                        "tokens": 0,
+                        "cost_usd": 0,
+                        "duration_ms": 0,
+                        "result": sup_state.output[:200] if sup_state.output and i == len(sup_state.agent_names) - 1 else None,
+                        "error": sup_state.error if sup_state.status == "failed" else None,
+                    }
+                    for i, name in enumerate(sup_state.agent_names)
+                ],
+                "optimization_insights": {
+                    "cost_breakdown": [],
+                    "tool_usage": {},
+                    "suggestions": [],
+                },
+            }
+
+    # 回退到 legacy orchestrator
     orchestrator = get_orchestrator()
     exec_data = orchestrator.get_execution(execution_id)
     if not exec_data:

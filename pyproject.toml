@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "langchain>=0.3.0",
     "langgraph>=0.2.0",
+    "langgraph-supervisor>=0.0.31",
     "deepagents>=0.1.0",
     "langchain-openai",
     "langsmith",

@@ -151,3 +151,29 @@ workflow.add_conditional_edges(
 )
 
 graph = workflow.compile()
+
+
+# === Supervisor Graph (for LangGraph Studio visualization) ===
+
+def _build_studio_supervisor():
+    """构建 supervisor 图用于 Studio 可视化。"""
+    from src.agent.registry import get_registry
+    from src.agent.supervisor import SupervisorManager
+
+    registry = get_registry(memory_dir=config.long_term.memory_dir)
+    graphs = registry.list_graphs()
+
+    if not graphs:
+        # 如果没有图定义，返回 None
+        return None
+
+    # 使用第一个图
+    graph_def = graphs[0]
+    mgr = SupervisorManager(registry, llm, TOOLS)
+    return mgr.build_supervisor(graph_def["id"])
+
+
+try:
+    supervisor_graph = _build_studio_supervisor()
+except Exception:
+    supervisor_graph = None
