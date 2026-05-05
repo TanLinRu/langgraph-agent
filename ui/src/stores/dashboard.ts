@@ -9,6 +9,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const skillTriggers = ref<SkillTrigger[]>([])
   const taskProgresses = ref<Map<string, TaskProgress>>(new Map())
   const observations = ref<Observation[]>([])
+  const counters = ref<Record<string, number>>({})
   let eventSource: EventSource | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let observationId = 0
@@ -74,6 +75,13 @@ export const useDashboardStore = defineStore('dashboard', () => {
       } catch { /* ignore */ }
     })
 
+    eventSource.addEventListener('metric_update', (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        handleMetricUpdate(data.data, data.timestamp)
+      } catch { /* ignore */ }
+    })
+
     eventSource.onerror = () => {
       connected.value = false
       eventSource?.close()
@@ -103,7 +111,22 @@ export const useDashboardStore = defineStore('dashboard', () => {
       case 'skill_trigger': handleSkillTrigger(data, timestamp); break
       case 'task_progress': handleTaskProgress(data, timestamp); break
       case 'step_complete': handleStepComplete(data, timestamp); break
+      case 'metric_update': handleMetricUpdate(data, timestamp); break
     }
+  }
+
+  function handleMetricUpdate(data: Record<string, unknown>, timestamp: string) {
+    // Update counters based on metric data
+    if (data.total_tokens) {
+      counters.value.total_tokens = (counters.value.total_tokens || 0) + (data.total_tokens as number)
+    }
+    if (data.cost_usd) {
+      counters.value.total_cost_usd = (counters.value.total_cost_usd || 0) + (data.cost_usd as number)
+    }
+    if (data.total_llm_calls) {
+      counters.value.total_llm_calls = (counters.value.total_llm_calls || 0) + 1
+    }
+    addObservation('metric_update', data, timestamp)
   }
 
   function handleAgentStatus(data: Record<string, unknown>, timestamp: string) {
@@ -169,7 +192,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
 
   return {
     isOpen, connected,
-    agentActivities, skillTriggers, taskProgresses, observations,
+    agentActivities, skillTriggers, taskProgresses, observations, counters,
     toggle, connectSSE, disconnectSSE, loadSnapshot,
   }
 })

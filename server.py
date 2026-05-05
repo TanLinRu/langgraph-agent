@@ -32,6 +32,9 @@ from src.agent.orchestrator import get_orchestrator
 # from src.agent.orchestrator import get_orchestrator
 from src.agent.supervisor import get_supervisor_manager, SupervisorManager
 from src.agent.event_bus import get_event_bus, ExecutionEvent
+from src.agent.metrics_collector import get_metrics_collector
+from src.agent.metrics_store import get_metrics_store
+from src.agent.system_metrics import get_system_collector
 from src.agent.sop_state import (
     list_state_files,
     load_sop_state,
@@ -112,7 +115,18 @@ async def lifespan(app: FastAPI):
     # 初始化 Supervisor Manager
     supervisor_mgr = get_supervisor_manager(registry, agent.llm, TOOLS)
     app.state.supervisor_mgr = supervisor_mgr
-    logger.info("Agent Registry 和 SupervisorManager 已初始化")
+    
+    # 初始化 Metrics
+    metrics_collector = get_metrics_collector()
+    metrics_store = get_metrics_store()
+    system_collector = get_system_collector()
+    app.state.metrics_collector = metrics_collector
+    app.state.metrics_store = metrics_store
+    
+    # 启动系统指标采集
+    await system_collector.start()
+    
+    logger.info("Agent Registry, SupervisorManager 和 Metrics 已初始化")
     
     yield
     if agent:
@@ -223,6 +237,67 @@ async def get_metrics():
     if not agent:
         return {}
     return agent.get_metrics()
+
+
+@app.get("/api/v1/metrics/snapshot")
+async def get_metrics_snapshot():
+    """Get current metrics snapshot."""
+    collector = get_metrics_collector()
+    return collector.get_snapshot()
+
+
+@app.get("/api/v1/metrics/counters")
+async def get_metrics_counters():
+    """Get counter metrics."""
+    collector = get_metrics_collector()
+    return {"counters": collector.get_counters()}
+
+
+@app.get("/api/v1/metrics/gauges")
+async def get_metrics_gauges():
+    """Get gauge metrics."""
+    collector = get_metrics_collector()
+    return {"gauges": collector.get_gauges()}
+
+
+@app.get("/api/v1/metrics/histograms")
+async def get_metrics_histograms():
+    """Get histogram metrics with percentiles."""
+    collector = get_metrics_collector()
+    return {"histograms": collector.get_histograms()}
+
+
+@app.get("/api/v1/metrics/system-health")
+async def get_system_health():
+    """Get system health metrics."""
+    collector = get_metrics_collector()
+    return {
+        "memory_rss_mb": collector.get_gauges().get("memory_rss_mb{}", 0),
+        "memory_vms_mb": collector.get_gauges().get("memory_vms_mb{}", 0),
+        "cpu_percent": collector.get_gauges().get("cpu_percent{}", 0),
+        "thread_count": collector.get_gauges().get("thread_count{}", 0),
+    }
+
+
+@app.get("/api/v1/traces")
+async def get_traces(limit: int = 100):
+    """Get completed trace spans."""
+    collector = get_metrics_collector()
+    spans = collector.get_completed_spans()
+    return {
+        "traces": [
+            {
+                "span_id": s.span_id,
+                "name": s.name,
+                "start_time": s.start_time,
+                "end_time": s.end_time,
+                "duration": s.end_time - s.start_time if s.end_time else None,
+                "status": s.status,
+                "attributes": s.attributes,
+            }
+            for s in spans[-limit:]
+        ]
+    }
 
 
 @app.get("/api/skills")

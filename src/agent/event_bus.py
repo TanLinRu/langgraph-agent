@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExecutionEvent:
     """执行事件"""
-    event_type: str  # 'agent_status' | 'skill_trigger' | 'task_progress' | 'step_complete'
+    event_type: str  # 'agent_status' | 'skill_trigger' | 'task_progress' | 'step_complete' | 'metric_update' | 'system_health'
     data: dict
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
