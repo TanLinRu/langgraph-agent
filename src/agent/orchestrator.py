@@ -1,5 +1,8 @@
 """
-Multi-Agent 编排器
+⚠️ DEPRECATED: 此模块已废弃，请使用 SupervisorManager
+移除时间: 2026-Q3
+
+Multi-Agent 编排器（已废弃）
 
 负责执行计划生成、执行调度、状态管理
 """

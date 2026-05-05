@@ -1,5 +1,84 @@
 // ========== Chat ==========
 
+// 工具调用状态
+export type ToolStatus = 'pending' | 'running' | 'success' | 'error'
+
+// 单个工具调用
+export interface ToolInvocation {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
+  status: ToolStatus
+  result?: string
+  startedAt?: string
+  completedAt?: string
+  duration?: number
+  error?: string
+}
+
+// 执行步骤（用于图展示）
+export interface ExecutionStep {
+  stepId: number
+  agentId: string
+  agentName: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  completedAt?: string
+  result?: string
+  error?: string
+}
+
+// 执行图数据（Vue Flow 格式）
+export interface FlowNode {
+  id: string
+  type: string
+  position: { x: number; y: number }
+  data: {
+    label: string
+    status: string
+    agent_id?: string
+  }
+  style?: Record<string, string>
+}
+
+export interface FlowEdge {
+  id: string
+  source: string
+  target: string
+  type?: string
+  animated?: boolean
+  style?: Record<string, string>
+}
+
+export interface ExecutionGraphData {
+  execution_id: string
+  graph_id: string
+  status: string
+  nodes: FlowNode[]
+  edges: FlowEdge[]
+}
+
+// 指标数据
+export interface TurnMetric {
+  turn: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cost_usd: number
+  elapsed_sec: number
+}
+
+export interface ExecutionMetrics {
+  total_requests?: number
+  total_tokens?: number
+  total_cost_usd?: number
+  total_latency_sec?: number
+  avg_latency_sec?: number
+  tool_calls?: number
+  compressions?: number
+  turns?: TurnMetric[]
+}
+
 export interface ToolCall {
   name: string
   arguments?: unknown
@@ -12,13 +91,17 @@ export interface Message {
   tool_calls?: ToolCall[] | null
 }
 
+// 增强的 ChatTurn
 export interface ChatTurn {
   id: number
   userMessage: string
   reply: string
   messages: Message[]
   tool_calls: ToolCall[] | null
-  metrics: Record<string, unknown>
+  toolInvocations: ToolInvocation[]      // 增强：工具调用详情
+  executionSteps: ExecutionStep[]       // 增强：执行步骤
+  executionGraph?: ExecutionGraphData  // 增强：执行图
+  metrics: ExecutionMetrics
   compression_count: number | null
   elapsed_sec: number
   expanded: boolean

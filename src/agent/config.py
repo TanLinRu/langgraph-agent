@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel, ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Literal
 
@@ -10,7 +10,7 @@ class ShortTermConfig(BaseModel):
     trigger_threshold: float = 0.7
     keep_recent: int = 5
     preserve_system: bool = True
-    model_config = {"extra": "ignore"}
+    model_config = ConfigDict(extra="ignore")
 
 
 class LongTermConfig(BaseModel):
@@ -20,7 +20,7 @@ class LongTermConfig(BaseModel):
     vector_enabled: bool = True
     vector_dimension: int = 1536
     chroma_persist_dir: str = "./memory/chroma"
-    model_config = {"extra": "ignore"}
+    model_config = ConfigDict(extra="ignore")
 
 
 class InitializationConfig(BaseModel):
@@ -29,7 +29,7 @@ class InitializationConfig(BaseModel):
     load_recent_sessions: int = 5
     load_memory: bool = True
     search_similar: bool = True
-    model_config = {"extra": "ignore"}
+    model_config = ConfigDict(extra="ignore")
 
 
 class AgentConfig(BaseSettings):
@@ -42,10 +42,11 @@ class AgentConfig(BaseSettings):
     long_term: LongTermConfig = LongTermConfig()
     initialization: InitializationConfig = InitializationConfig()
 
-    class Config:
-        env_file = ".env"
-        env_prefix = "AGENT_"
-        extra = "ignore"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="AGENT_",
+        extra="ignore",
+    )
 
 
 DEFAULT_CONFIG = AgentConfig()

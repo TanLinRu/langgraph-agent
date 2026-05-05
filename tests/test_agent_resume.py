@@ -1,12 +1,13 @@
 import pytest
 import os
+import sys
 import json
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 
 class TestMultiTurnResume:
-
+    @pytest.mark.skipif(sys.platform == "win32", reason="langgraph checkpointer issue on Windows")
     def test_run_appends_to_existing_messages(self, tmp_path):
         """验证 run() 从 checkpointer 恢复已有消息并追加新输入"""
         mem_dir = str(tmp_path / "memory")
@@ -45,6 +46,7 @@ class TestMultiTurnResume:
             messages = channel_values.get("messages", [])
             assert len(messages) > 0
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="langgraph checkpointer issue on Windows")
     def test_multi_turn_messages_accumulate(self, tmp_path):
         """验证多次 run 调用后消息正确累积"""
         mem_dir = str(tmp_path / "memory")

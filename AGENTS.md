@@ -41,8 +41,10 @@ Each reply has an **expand detail** button showing full messages, tool calls, an
 
 ## Key Facts
 
-- **Python >= 3.11** required (set in pyproject.toml)
-- **Tests**: `pytest tests/` — 42 tests covering routing, compression, metrics, storage, resume
+- **Python >= 3.11** required
+- **Install**: `pip install -e ".[dev]"` for dev extras (pytest, ruff, mypy)
+- **Tests**: `pytest tests/` — 70 tests; fixtures in `tests/conftest.py` (mock_config, mock_llm, mock_env_vars, agent); run single file: `pytest tests/test_compression.py -v`; run by name: `pytest -k "test_name"`
+- **LangGraph Studio**: `langgraph dev` loads graph from `src/agent/graph.py`
 - **No CI / pre-commit** configured
 - **Lint**: `ruff check . --fix` (line-length 100, ignores E501)
 - **Type check**: `mypy .` (strict mode)
@@ -58,23 +60,28 @@ Each reply has an **expand detail** button showing full messages, tool calls, an
 | `AGENT_MEMORY_DIR` | `.env` | Default `./memory` |
 | `AGENT_SESSION_TTL_DAYS` | `.env` | Default `7` |
 
-All other settings use `AGENT_` prefix via pydantic-settings.
+**Critical**: Only `OPENAI_API_KEY` and `OPENAI_BASE_URL` are loaded directly. All other settings use `AGENT_` prefix via pydantic-settings.
 
 ## Architecture
 
 LangGraph state machine: **init → think → (execute → compress → save) → [should_continue] → think/END** (loop).
 
+- `src/agent/graph.py` — LangGraph StateGraph; entry for `langgraph dev`
 - `src/agent/agent.py` — Agent class + `create_agent()` factory
 - `src/agent/orchestrator.py` — multi-agent orchestration
-- `src/agent/registry.py` — agent/graph registry for multi-agent
+- `src/agent/registry.py` — agent/graph registry (includes OpenCode with `execution_mode: "acp"`)
+- `src/agent/opencode_agent.py` — OpenCode wrapper (calls CLI externally)
 - `src/agent/acp_server.py` — ACP server (JSON-RPC over stdio)
 - `src/agent/main.py` — CLI entrypoint (`python -m src.agent.main`)
 - `src/agent/config.py` — pydantic-settings config (env file: `.env`, prefix: `AGENT_`)
-- `src/agent/state.py` — AgentState definition
+- `src/agent/state.py` — AgentState TypedDict
 - `src/agent/context/` — long_term (SQLite+ChromaDB), compression (70% threshold, keep 5), initialization (resume), archive (7-day TTL)
 - `src/agent/tools/` — tool registry (`TOOLS` list in `__init__.py`)
 - `src/agent/skills/` — skill system (`SKILLS_INDEX` in `__init__.py`)
 - `src/agent/prompts/` — system prompts (`SYSTEM_PROMPT` in `__init__.py`)
+- `workflows.json` — predefined multi-step workflow definitions
+- `ui/` — Vue 3 + Vite + TypeScript + Vue Flow chat frontend
+- `server.py` — FastAPI backend (HTTP + optional ACP)
 
 ## Context Design
 
@@ -97,3 +104,4 @@ LangGraph state machine: **init → think → (execute → compress → save) �
 - `docs/architecture/design-spec.md` — architecture spec
 - `docs/langchain-langgraph-deepagents-guide.md` — technical guide
 - `docs/agent-architecture-notes.md` — agent architecture principles
+- `docs/task-plan-product-operations.md` — 产品/运营场景 + Chat UI 指标增强实施计划

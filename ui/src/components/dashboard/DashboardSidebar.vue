@@ -4,6 +4,9 @@ import AgentActivityPanel from './AgentActivityPanel.vue'
 import SkillTriggerPanel from './SkillTriggerPanel.vue'
 import TaskProgressPanel from './TaskProgressPanel.vue'
 import ObservationFeed from './ObservationFeed.vue'
+import MetricsPanel from './MetricsPanel.vue'
+import ToolsPanel from './ToolsPanel.vue'
+import PRDInputPanel from './PRDInputPanel.vue'
 
 const dashboard = useDashboardStore()
 </script>
@@ -25,6 +28,9 @@ const dashboard = useDashboardStore()
       </div>
 
       <div class="dashboard-panels">
+        <MetricsPanel />
+        <ToolsPanel />
+        <PRDInputPanel />
         <AgentActivityPanel />
         <SkillTriggerPanel />
         <TaskProgressPanel />

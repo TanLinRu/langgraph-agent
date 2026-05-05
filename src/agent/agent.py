@@ -128,6 +128,7 @@ class Agent:
             "tool_calls": 0,
             "compressions": 0,
         }
+        self._turn_metrics = []
 
     def _build_graph(self):
         """构建状态图"""
@@ -270,7 +271,8 @@ Status: {sop_state.get('status')}
                 logger.info(f"[LLM Response] Content length: {len(response.content) if response.content else 0}")
                 logger.info(f"[LLM Response] Content preview: {content[:100]}...")
 
-            tokens = 0
+            prompt_tokens = 0
+            completion_tokens = 0
             if hasattr(response, 'response_metadata'):
                 meta = response.response_metadata
                 prompt_tokens = meta.get('prompt_tokens', 0)
@@ -282,10 +284,20 @@ Status: {sop_state.get('status')}
                 if completion_tokens:
                     logger.info(f"[LLM Response] Completion tokens: {completion_tokens}")
 
+            tokens = prompt_tokens + completion_tokens
             if tokens > 0:
                 self._metrics["total_tokens"] += tokens
                 estimated_cost = self._estimate_cost(prompt_tokens, completion_tokens)
                 self._metrics["total_cost"] += estimated_cost
+
+                self._turn_metrics.append({
+                    "turn": len(self._turn_metrics) + 1,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": tokens,
+                    "cost_usd": round(estimated_cost, 4),
+                    "elapsed_sec": round(elapsed, 2),
+                })
 
             return {"messages": [response]}
 
@@ -461,7 +473,12 @@ Status: {sop_state.get('status')}
             "avg_latency_sec": round(avg_latency, 2),
             "tool_calls": self._metrics["tool_calls"],
             "compressions": self._metrics["compressions"],
+            "turns": self._turn_metrics,
         }
+
+    def get_turn_metrics(self) -> list:
+        """获取每次交互的详细指标"""
+        return self._turn_metrics
 
     def reset_metrics(self):
         """重置指标"""
@@ -473,6 +490,7 @@ Status: {sop_state.get('status')}
             "tool_calls": 0,
             "compressions": 0,
         }
+        self._turn_metrics = []
 
     def _estimate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
         """估算 API 成本"""

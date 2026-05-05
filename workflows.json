@@ -349,5 +349,170 @@
     ],
     "created_at": "2026-05-02 12:30:00",
     "updated_at": "2026-05-02 12:30:00"
+  },
+  {
+    "id": "wf-crm-ticket",
+    "name": "客服工单处理",
+    "description": "客服工单自动处理：问题分类、智能回复、工单闭环",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "label": "问题分类",
+          "description": "自动识别工单类型：咨询/投诉/技术问题"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "dispatch",
+        "data": {
+          "label": "智能回复",
+          "cli": "opencode",
+          "mode": "run",
+          "task_template": "根据工单类型生成智能回复"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "label": "工单闭环",
+          "description": "更新工单状态，生成处理总结"
+        },
+        "position": { "x": 700, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" }
+    ],
+    "created_at": "2026-05-05 20:45:00",
+    "updated_at": "2026-05-05 20:45:00"
+  },
+  {
+    "id": "wf-crm-followup",
+    "name": "CRM 客户跟进",
+    "description": "客户信息提取、跟进计划生成、提醒设置",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "label": "客户画像",
+          "description": "从对话中提取客户关键信息"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "skill",
+        "data": {
+          "label": "跟进计划",
+          "description": "生成下次跟进时间和内容"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "label": "提醒设置",
+          "description": "设置后续提醒"
+        },
+        "position": { "x": 700, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" }
+    ],
+    "created_at": "2026-05-05 20:45:00",
+    "updated_at": "2026-05-05 20:45:00"
+  },
+  {
+    "id": "wf-data-report",
+    "name": "数据分析报表",
+    "description": "数据查询、统计分析、报表生成",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "label": "数据查询",
+          "description": "执行数据查询"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "skill",
+        "data": {
+          "label": "统计分析",
+          "description": "趋势分析、对比分析"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "label": "报表生成",
+          "description": "生成可读报表"
+        },
+        "position": { "x": 700, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" }
+    ],
+    "created_at": "2026-05-05 20:45:00",
+    "updated_at": "2026-05-05 20:45:00"
+  },
+  {
+    "id": "wf-prd-design",
+    "name": "PRD 可视化设计",
+    "description": "PRD 需求分析、流程图生成、HTML 原型输出",
+    "nodes": [
+      {
+        "id": "node-1",
+        "type": "skill",
+        "data": {
+          "skill": "flow_design",
+          "label": "需求分析",
+          "description": "提取业务需求、功能点、技术约束"
+        },
+        "position": { "x": 100, "y": 100 }
+      },
+      {
+        "id": "node-2",
+        "type": "skill",
+        "data": {
+          "skill": "flow_design",
+          "label": "流程设计",
+          "description": "生成 Mermaid 流程图"
+        },
+        "position": { "x": 400, "y": 100 }
+      },
+      {
+        "id": "node-3",
+        "type": "skill",
+        "data": {
+          "skill": "html_prototype",
+          "label": "HTML 生成",
+          "description": "输出可编辑 HTML 原型"
+        },
+        "position": { "x": 700, "y": 100 }
+      }
+    ],
+    "edges": [
+      { "id": "edge-1", "source": "node-1", "target": "node-2" },
+      { "id": "edge-2", "source": "node-2", "target": "node-3" }
+    ],
+    "created_at": "2026-05-05 20:45:00",
+    "updated_at": "2026-05-05 21:00:00"
   }
 ]

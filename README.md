@@ -1,28 +1,156 @@
 # LangGraph Agent
 
-> 生产级代码开发与数据处理 Agent，集成 OpenCode 作为外部执行引擎
+> 生产级代码开发与数据处理 Agent，支持多 Agent 编排、SOP 流程、产品/运营场景
 
 ## 快速开始
 
 ```bash
-# 安装依赖
+# 安装
 pip install -e .
 
-# 复制配置
+# 配置
 cp .env.example .env
-# 编辑 .env 填入 API Key
+# 编辑 .env 填入 OPENAI_API_KEY
 
-# 运行
+# CLI 运行
 python -m src.agent.main --input "写一个快速排序"
-
-# 交互模式
 python -m src.agent.main --interactive
+python -m src.agent.main --archive        # 归档清理
+python -m src.agent.main --acp        # ACP 服务模式
 
-# 启动后端服务
+# API 服务 (Terminal 1)
 python server.py
 
-# 前端开发（另开终端）
+# 前端 (Terminal 2)
 cd ui && npm install && npm run dev
+# 访问 http://localhost:3000
+```
+
+## 系统架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Chat UI (Vue 3)                         │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │
+│  │Messages │ │Metrics  │ │Tools    │ │PRD Input       │  │
+│  │Panel   │ │Panel   │ │Panel   │ │Panel           │  │
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────────┬─────────┘  │
+│       │          │          │             │              │          │
+│       └──────────┴──────────┴────────────┴──────────────┘          │
+│                            │                                  │
+│                     SSE / HTTP                               │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│                      Server (FastAPI)                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │ /chat      │  │ /metrics   │  │ /api/exec   │ │
+│  │ /archive   │  │ /skills   │  │ /workflows  │ │
+│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘ │
+│        │               │               │            │
+│        └───────────────┴───────────────┴────────────┘ │
+│                        │                         │
+│         ┌──────────────▼──────────────┐         │
+│         │  SupervisorManager        │         │
+│         │  (多 Agent 编排)           │         │
+│         └────────┬───────────────┘         │
+│                  │                     │
+│    ┌────────────┼─────────────────┐    │
+│    │           │             │     │    │
+│ ┌──▼──┐  ┌──▼──┐  ┌──▼──┐  │
+│ │Agent│  │Agent│  │Agent│  │
+│ │ #1 │  │ #2 │  │ #3 │  │
+│ └──┬─���┘  └──┬──┘  └──┬──┘  │
+│    │          │          │       │
+└────┼──────────┼──────────┼──────┘
+     │          │          │
+     └──────────┴──────────┘
+             │
+    ┌────────▼────────┐
+    │   LangGraph   │
+    │   StateGraph │
+    └─────┬───────┘
+          │
+┌────────▼─────────────────────────────────────────────────────┐
+│                   上下文管理                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │ 压缩器      │  │ 长期记忆    │  │ 归档       │ │
+│  │(70%阈值)   │  │(SQLite+     │  │(7天TTL)    │ │
+│  │            │  │ChromaDB)   │  │            │ │
+│  └──────────────┘  └──────────────┘  └──────────────┘ │
+└────────────────────────────────────────────────────────┘
+```
+
+## 业务架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│            产品/运营场景                                    │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  客服工单处理 Workflow (wf-crm-ticket)              │   │
+│  │  问题分类 → 智能回复 → 工单闭环                 │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  CRM 客户跟进 Workflow (wf-crm-followup)           │   │
+│  │  客户画像 → 跟进计划 → 提醒设置                  │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  数据分析 Workflow (wf-data-report)              │   │
+│  │  数据查询 → 统计分析 → 报表生成               │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  PRD 设计 Workflow (wf-prd-design)              │   │
+│  │  需求分析 → 流程设计 → HTML 原型生成          │   │
+│  └────────────────────────────────────────────────────���┘   │
+└─────────────────────────────────────────────────────────┘
+         │
+┌────────▼───────────────────────────────────┐
+│          Agent 配置                                │
+├───────────────────────────────────────┤
+│  crm-agent       │ CRM 客户管理        │
+│  data-analyst    │ 数据分析           │
+│  prd-designer   │ PRD 设计          │
+│  opencode-agent │ OpenCode 执行    │
+└───────────────────────────────────────┘
+```
+
+## 数据流
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    单次对话流程                                        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  用户输入 ──▶ init ──▶ sop_resume ──▶ think                         │
+│     │                                                              │          │
+│     │                                                         tools_call?    │
+│     │                                                           │          │
+│     │                                                      ┌──────┴─────┐  │
+│     │                                                      │            │  │
+│     │                                                     ┴▼─────────┐ │  │
+│     │                                                     │ execute  │ │  │
+│     │                                                     │ (工具执行) │ │  │
+│     │                                                     └────┬──────┘ │  │
+│     │                                                          │        │  │
+│     │                                                     ┌────┴──────┐ │
+│     │                                                     │ compress  │ │
+│     │                                                     │(70%阈值) │ │
+│     │                                                     └────┬──────┘ │
+│     │                                                          │        │
+│     │                                                  ┌────────┴────────┐ │
+│     │                                                  │             │      │
+│     │                                            save │         think   │      │
+│     │                                           │      │        │      │
+│     │                                      ┌────┴────┐   │  ┌────┴─────┐  │
+│     └──────────▶│持久化 │◀─────│  │  │ 继续循环 │  │
+│                └────┬────┘   │  └────┬─────┘  │
+│                     │       │       │       │       │
+│                     └───────┼───────┴───────┘       │
+│                         │                       │
+│                    END ◀─────────────────────────
+│
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 项目结构
@@ -30,55 +158,118 @@ cd ui && npm install && npm run dev
 ```
 langgraph-agent/
 ├── src/agent/              # 核心代码
-│   ├── context/            # 上下文管理
-│   │   ├── long_term.py    # SQLite + ChromaDB 长期记忆
-│   │   ├── compression.py # LLM 摘要压缩
+│   ├── agent.py           # Agent 主类
+│   ├── registry.py       # Agent/Graph 注册
+│   ├── supervisor.py    # 多 Agent 编排
+│   ├── config.py      # 配置定义
+│   ├── state.py       # 状态定义
+│   ├── context/      # 上下文管理
+│   │   ├── long_term.py    # SQLite + ChromaDB
+│   │   ├── compression.py  # 70% 阈值压缩
 │   │   ├── initialization.py # 重启恢复
-│   │   └── archive.py     # 归档
-│   ├── prompts/           # 系统提示
-│   ├── skills/            # 技能系统
-│   ├── tools/             # 工具集
-│   ├── agent.py           # 主入口
-│   ├── orchestrator.py   # 多 Agent 编排
-│   ├── registry.py       # Agent 注册
-│   ├── opencode_client.py # OpenCode CLI 客户端
-│   └── acp_stdio_client.py # ACP Stdio 客户端（备用）
-│
-├── ui/                    # 前端 Vue 项目
-│
-├── memory/                # 会话存储
-│
-├── tests/                 # pytest 测试
-│
-├── docs/                  # 文档
-│
-└── server.py             # 后端 HTTP API
+│   │   └── archive.py      # 7 天归档
+│   ├── skills/       # 技能系统
+│   ├── tools/        # 工具集
+│   ├── prompts/      # 系统提示
+├── ui/                # Vue 3 前端
+│   └── src/
+│       ├── components/dashboard/  # 侧边栏面板
+│       │   ├── MetricsPanel.vue   # 指标概览
+│       │   ├── ToolsPanel.vue   # 工具列表
+│       │   ├── PRDInputPanel.vue # PRD 输入
+│       │   └── ...
+│       └── stores/dashboard.ts   # 状态管理
+├── server.py           # FastAPI 后端
+├── workflows.json     # Workflow 模板
+├── memory/           # 会话存储
+├── tests/           # pytest (70 tests)
+└── docs/            # 文档
 ```
 
-## OpenCode 集成
+## 核心特性
 
-通过 execution_mode: acp 属性，可以将 OpenCode 作为外部 Agent 调用：
+### 1. 多 Agent 编排
+- SupervisorManager 调度多个 Agent
+- 支持同步/异步执行模式
+- 执行状态实时推送 (SSE)
 
-```python
-opencode_agent = {
-    "id": "opencode-agent",
-    "name": "OpenCode",
-    "execution_mode": "acp",
-    "timeout": 180,
-    "skill": None,
-}
-```
+### 2. 上下文管理
+- **压缩**: 70% token 阈值触发
+- **长期记忆**: SQLite + ChromaDB
+- **归档**: 7 天自动清理
 
-## 特性
+### 3. SOP 流程
+- 状态持久化
+- 步骤恢复
+- 多模板支持
 
-- OpenCode 集成: 通过 CLI/ACP 调度外部 OpenCode 执行任务
-- 上下文压缩: 70% 阈值触发 LLM 摘要
-- 长期记忆: MEMORY.md + ChromaDB 向量
-- 会话存储: SQLite + JSONL
-- 自动归档: 7 天自动归档
+### 4. 产品/运营场景
+- 客服工单处理 Workflow
+- CRM 客户跟进 Workflow
+- 数据分析报表 Workflow
+- PRD 可视化设计 Workflow
+
+## API 端点
+
+| 端点 | 说明 |
+|------|------|
+| `POST /chat` | 对话执行 |
+| `GET /metrics` | 指标统计 |
+| `GET /api/registry/tools` | 工具/Skills/Agents 注册表 |
+| `GET /api/execution/current` | 当前执行状态 |
+| `GET /api/events/stream` | SSE 事件流 |
+| `GET /api/workflows` | Workflow 列表 |
+| `GET /api/skills` | Skills 列表 |
+
+## 预置 Workflow
+
+| ID | 名称 | 说明 |
+|----|------|------|
+| `wf-crm-ticket` | 客服工单处理 | 问题分类 → 智能回复 → 工单闭环 |
+| `wf-crm-followup` | CRM 客户跟进 | 客户画像 → 跟进计划 → 提醒设置 |
+| `wf-data-report` | 数据分析报表 | 数据查询 → 统计分析 → 报表生成 |
+| `wf-prd-design` | PRD 可视化设计 | 需求分析 → 流程设计 → HTML 原型 |
+
+## 预置 Agents
+
+| ID | 名称 | 说明 |
+|----|------|------|
+| `crm-agent` | CRM Agent | 客户信息管理、跟进计划 |
+| `data-analyst-agent` | Data Analyst | 数据分析、报表生成 |
+| `prd-designer-agent` | PRD Designer | PRD 可视化设计 |
+
+## 前端侧边栏面板
+
+- **指标概览**: Token 消耗、费用、耗时、Turn 详情
+- **可用工具**: 工具 / 技能 / Agent 列表
+- **PRD 输入**: 产品需求文档表单 → 自动生成流程图 + HTML 原型
+- **任务进度**: Agent 执行状态实时展示
 
 ## 测试
 
 ```bash
+# 运行所有测试
 pytest tests/
+
+# 运行单个测试
+pytest tests/test_metrics.py -v
+
+# 跳过慢速测试
+pytest tests/ -v --ignore=tests/test_agent_resume.py
 ```
+
+## 配置
+
+| 环境变量 | 说明 | 默认值 |
+|---------|------|--------|
+| `OPENAI_API_KEY` | OpenAI API Key | - |
+| `OPENAI_BASE_URL` | API 地址 | `https://api.openai.com/v1` |
+| `AGENT_MODEL` | 模型 | `openai:gpt-4` |
+| `AGENT_MEMORY_DIR` | 存储目录 | `./memory` |
+| `AGENT_SESSION_TTL_DAYS` | 会话 TTL | `7` |
+
+## 文档
+
+- `docs/task-plan-product-operations.md` - 产品/运营场景实施计划
+- `docs/architecture/design-spec.md` - 架构设计
+- `AGENTS.md` - 开发指南

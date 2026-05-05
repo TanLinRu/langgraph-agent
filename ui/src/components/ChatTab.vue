@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, nextTick, onMounted, computed } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useDashboardStore } from '../stores/dashboard'
 import { formatTime, truncate } from '../utils/format'
 import DashboardSidebar from './dashboard/DashboardSidebar.vue'
+import ToolInvocationCard from './ToolInvocationCard.vue'
+import ExecutionFlow from './ExecutionFlow.vue'
+import type { ChatTurn, ToolInvocation, ExecutionGraphData } from '../types'
 
 const chat = useChatStore()
 const dashboard = useDashboardStore()
@@ -28,14 +31,17 @@ async function sendMessage() {
   // We need to do the turn creation and scroll manually since store doesn't have chatArea ref
   chat.loading = true
   const turnId = Date.now()
-  const currentTurn = {
+  const currentTurn: ChatTurn = {
     id: turnId,
     userMessage: text,
     reply: '',
-    messages: [] as any[],
-    tool_calls: null as any,
-    metrics: {} as Record<string, unknown>,
-    compression_count: null as number | null,
+    messages: [],
+    tool_calls: null,
+    toolInvocations: [],
+    executionSteps: [],
+    executionGraph: undefined,
+    metrics: {},
+    compression_count: null,
     elapsed_sec: 0,
     expanded: false,
   }
@@ -63,6 +69,17 @@ async function sendMessage() {
     currentTurn.metrics = data.metrics || {}
     currentTurn.compression_count = data.compression_count
     currentTurn.elapsed_sec = data.elapsed_sec
+
+    // 转换 tool_calls 到 toolInvocations
+    if (data.tool_calls && data.tool_calls.length > 0) {
+      currentTurn.toolInvocations = data.tool_calls.map((tc: any, index: number) => ({
+        id: `tool-${turnId}-${index}`,
+        name: tc.name,
+        arguments: tc.arguments || {},
+        status: 'success' as const,
+        result: tc.result || '',
+      }))
+    }
 
     await nextTick()
     scrollToBottom()
@@ -163,6 +180,20 @@ onMounted(() => {
               <button class="detail-btn" @click="turn.expanded = !turn.expanded">
                 {{ turn.expanded ? '▲ 收起' : '▼ 详情' }}
               </button>
+            </div>
+
+            <!-- 工具调用卡片 -->
+            <div v-if="turn.toolInvocations && turn.toolInvocations.length > 0" class="tool-invocations">
+              <ToolInvocationCard
+                v-for="invocation in turn.toolInvocations"
+                :key="invocation.id"
+                :invocation="invocation"
+              />
+            </div>
+
+            <!-- 执行图 -->
+            <div v-if="turn.executionGraph" class="execution-graph-section">
+              <ExecutionFlow :graph-data="turn.executionGraph" />
             </div>
 
             <transition name="slide">
@@ -582,5 +613,15 @@ onMounted(() => {
   text-align: center;
   color: #8b949e;
   font-size: 13px;
+}
+
+.tool-invocations {
+  margin-top: 8px;
+  padding-left: 38px;
+}
+
+.execution-graph-section {
+  margin-top: 8px;
+  padding-left: 38px;
 }
 </style>

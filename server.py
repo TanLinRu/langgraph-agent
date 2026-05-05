@@ -28,6 +28,8 @@ from src.agent.skills import SKILLS_REGISTRY, get_skill, SKILLS_INDEX
 from src.agent.tools import TOOLS
 from src.agent.registry import get_registry
 from src.agent.orchestrator import get_orchestrator
+# DEPRECATED: orchestrator 已废弃，请使用 SupervisorManager
+# from src.agent.orchestrator import get_orchestrator
 from src.agent.supervisor import get_supervisor_manager, SupervisorManager
 from src.agent.event_bus import get_event_bus, ExecutionEvent
 from src.agent.sop_state import (
@@ -106,12 +108,11 @@ async def lifespan(app: FastAPI):
     
     # 初始化 Agent 注册表
     registry = get_registry(memory_dir=config.long_term.memory_dir)
-    orchestrator = get_orchestrator(registry, agent.llm)
 
     # 初始化 Supervisor Manager
     supervisor_mgr = get_supervisor_manager(registry, agent.llm, TOOLS)
     app.state.supervisor_mgr = supervisor_mgr
-    logger.info("Agent Registry, Orchestrator 和 SupervisorManager 已初始化")
+    logger.info("Agent Registry 和 SupervisorManager 已初始化")
     
     yield
     if agent:
@@ -278,6 +279,45 @@ async def list_tools():
             "description": t.description,
         })
     return {"tools": tools, "count": len(tools)}
+
+
+@app.get("/api/registry/tools")
+async def list_registry_tools():
+    """返回所有已注册的 tools、skills、agents"""
+    registry = get_registry()
+
+    tools = []
+    for t in TOOLS:
+        tools.append({
+            "name": t.name,
+            "description": t.description,
+            "category": "system",
+        })
+
+    skills = []
+    for name, info in SKILLS_REGISTRY.items():
+        skills.append({
+            "name": info["name"],
+            "description": info["description"],
+            "use_when": info.get("use_when", ""),
+            "category": "skill",
+        })
+
+    agents = []
+    for agent_def in registry.list_agents():
+        agents.append({
+            "id": agent_def.get("id"),
+            "name": agent_def.get("name"),
+            "description": agent_def.get("description", ""),
+            "category": "agent",
+        })
+
+    return {
+        "tools": tools,
+        "skills": skills,
+        "agents": agents,
+        "total": len(tools) + len(skills) + len(agents),
+    }
 
 
 WORKFLOWS_FILE = os.path.join(os.path.dirname(__file__), "workflows.json")
@@ -659,29 +699,16 @@ class ExecutionPlanRequest(BaseModel):
 
 @app.post("/api/execution/plan")
 async def generate_execution_plan(req: ExecutionPlanRequest):
-    """生成执行计划（优先使用 SupervisorManager，回退到 legacy orchestrator）"""
+    """生成执行计划（使用 SupervisorManager）"""
     supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
-    if supervisor_mgr:
-        plan = supervisor_mgr.generate_plan(req.graph_id, req.input_text)
-        if plan:
-            return plan
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
 
-    # 回退到 legacy orchestrator
-    orchestrator = get_orchestrator()
-    plan = orchestrator.generate_plan(req.graph_id, req.input_text)
+    plan = supervisor_mgr.generate_plan(req.graph_id, req.input_text)
     if not plan:
-        raise HTTPException(status_code=400, detail="Failed to generate plan")
+        raise HTTPException(status=400, detail="Failed to generate plan")
 
-    return {
-        "graph_id": plan.graph_id,
-        "input_summary": plan.input_summary,
-        "total_llm_calls": plan.total_llm_calls,
-        "estimated_cost_usd": plan.estimated_cost_usd,
-        "estimated_duration_sec": plan.estimated_duration_sec,
-        "steps": plan.steps,
-        "parallel_opportunities": plan.parallel_opportunities,
-        "optimization_suggestions": plan.optimization_suggestions,
-    }
+    return plan
 
 
 class ExecutionRunRequest(BaseModel):
@@ -692,13 +719,29 @@ class ExecutionRunRequest(BaseModel):
 
 @app.post("/api/execution/run")
 async def run_execution(req: ExecutionRunRequest):
-    """执行 Graph（优先使用 SupervisorManager，回退到 legacy orchestrator）"""
-    global agent
+    """执行 Graph（使用 SupervisorManager）"""
     if not req.approved:
         return {
             "status": "pending_approval",
             "message": "等待用户批准执行计划"
         }
+
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
+
+    try:
+        result = await supervisor_mgr.run(
+            req.graph_id, req.input_text, thread_id="default"
+        )
+        return {
+            "execution_id": result["execution_id"],
+            "status": result["status"],
+            "output": result.get("output"),
+        }
+    except Exception as e:
+        logger.error(f"[Execution] Failed: {e}")
+        raise HTTPException(status=500, detail=str(e))
 
     # 优先使用 SupervisorManager
     supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
@@ -805,208 +848,246 @@ async def execute_legacy_workflow(req: LegacyWorkflowRequest):
 
 @app.get("/api/execution/{execution_id}/state")
 async def get_execution_state(execution_id: str):
-    """获取执行状态（支持 supervisor 和 legacy orchestrator）"""
-    # 先查 supervisor
+    """获取执行状态（使用 SupervisorManager）"""
     supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
-    if supervisor_mgr:
-        sup_state = supervisor_mgr.get_execution(execution_id)
-        if sup_state:
-            return {
-                "execution_id": sup_state.execution_id,
-                "graph_id": sup_state.graph_id,
-                "status": sup_state.status,
-                "current_step": None,
-                "total_llm_calls": sup_state.total_llm_calls,
-                "total_cost_usd": sup_state.total_cost_usd,
-                "elapsed_ms": sup_state.elapsed_ms,
-                "steps": [
-                    {
-                        "step_id": i + 1,
-                        "agent_id": name,
-                        "agent_name": name,
-                        "status": sup_state.status,
-                        "llm_calls": 0,
-                        "tool_calls": 0,
-                    }
-                    for i, name in enumerate(sup_state.agent_names)
-                ],
-            }
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
 
-    # 回退到 legacy orchestrator
-    orchestrator = get_orchestrator()
-    exec_data = orchestrator.get_execution(execution_id)
-    if not exec_data:
-        raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
+    sup_state = supervisor_mgr.get_execution(execution_id)
+    if not sup_state:
+        raise HTTPException(status=404, detail=f"Execution not found: {execution_id}")
 
-    state = exec_data["state"]
     return {
-        "execution_id": state.execution_id,
-        "graph_id": state.graph_id,
-        "status": state.status,
-        "current_step": state.current_step,
-        "total_llm_calls": state.total_llm_calls,
-        "total_cost_usd": state.total_cost_usd,
-        "elapsed_ms": state.elapsed_ms,
+        "execution_id": sup_state.execution_id,
+        "graph_id": sup_state.graph_id,
+        "status": sup_state.status,
+        "current_step": None,
+        "total_llm_calls": sup_state.total_llm_calls,
+        "total_cost_usd": sup_state.total_cost_usd,
+        "elapsed_ms": sup_state.elapsed_ms,
         "steps": [
             {
-                "step_id": s.step_id,
-                "agent_id": s.agent_id,
-                "agent_name": s.agent_name,
-                "status": s.status,
-                "llm_calls": len(s.llm_calls),
-                "tool_calls": len(s.tool_calls),
+                "step_id": i + 1,
+                "agent_id": name,
+                "agent_name": name,
+                "status": sup_state.status,
+                "llm_calls": 0,
+                "tool_calls": 0,
             }
-            for s in state.steps
+            for i, name in enumerate(sup_state.agent_names)
         ],
+    }
+
+
+@app.get("/api/execution/current")
+async def get_current_execution():
+    """获取当前活跃的执行状态"""
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if not supervisor_mgr:
+        return {"status": "no_execution", "execution": None}
+
+    executions = supervisor_mgr.list_executions()
+    if not executions:
+        return {"status": "no_execution", "execution": None}
+
+    for exec in reversed(executions):
+        if exec.get("status") == "running":
+            execution_id = exec.get("execution_id")
+            sup_state = supervisor_mgr.get_execution(execution_id)
+            return {
+                "status": "running",
+                "execution": {
+                    "execution_id": sup_state.execution_id,
+                    "graph_id": sup_state.graph_id,
+                    "status": sup_state.status,
+                    "input_text": sup_state.input_text[:100] if sup_state.input_text else "",
+                    "progress": {
+                        "current_step": len(sup_state.agent_names),
+                        "completed": sup_state.status == "completed",
+                    },
+                    "metrics": {
+                        "total_tokens": sup_state.total_tokens,
+                        "total_cost_usd": sup_state.total_cost_usd,
+                        "elapsed_ms": sup_state.elapsed_ms,
+                    },
+                },
+            }
+
+    latest = executions[-1]
+    return {
+        "status": "idle",
+        "execution": latest,
     }
 
 
 @app.get("/api/executions")
 async def list_executions():
-    """列出所有执行（包括 supervisor 和 legacy）"""
-    executions = []
-
-    # Supervisor executions
+    """列出所有执行"""
     supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
-    if supervisor_mgr:
-        executions.extend(supervisor_mgr.list_executions())
+    if not supervisor_mgr:
+        return {"executions": []}
 
-    # Legacy orchestrator executions
-    orchestrator = get_orchestrator()
-    executions.extend(orchestrator.list_executions())
-
+    executions = supervisor_mgr.list_executions()
     return {"executions": executions}
 
 
 @app.get("/api/execution/{execution_id}/report")
 async def get_execution_report(execution_id: str):
-    """获取执行完成后的详细报告（支持 supervisor 和 legacy）"""
-    # 先查 supervisor
+    """获取执行完成后的详细报告"""
     supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
-    if supervisor_mgr:
-        sup_state = supervisor_mgr.get_execution(execution_id)
-        if sup_state:
-            return {
-                "execution_id": sup_state.execution_id,
-                "graph_id": sup_state.graph_id,
-                "status": sup_state.status,
-                "input": sup_state.input_text[:100],
-                "output": sup_state.output[:500] if sup_state.output else None,
-                "summary": {
-                    "total_steps": len(sup_state.agent_names),
-                    "completed_steps": len(sup_state.agent_names) if sup_state.status == "completed" else 0,
-                    "failed_steps": 1 if sup_state.status == "failed" else 0,
-                    "total_llm_calls": sup_state.total_llm_calls,
-                    "total_tokens": sup_state.total_tokens,
-                    "total_cost_usd": sup_state.total_cost_usd,
-                    "total_duration_ms": sup_state.elapsed_ms,
-                },
-                "step_details": [
-                    {
-                        "step_id": i + 1,
-                        "agent_name": name,
-                        "status": sup_state.status,
-                        "llm_calls": 0,
-                        "tokens": 0,
-                        "cost_usd": 0,
-                        "duration_ms": 0,
-                        "result": sup_state.output[:200] if sup_state.output and i == len(sup_state.agent_names) - 1 else None,
-                        "error": sup_state.error if sup_state.status == "failed" else None,
-                    }
-                    for i, name in enumerate(sup_state.agent_names)
-                ],
-                "optimization_insights": {
-                    "cost_breakdown": [],
-                    "tool_usage": {},
-                    "suggestions": [],
-                },
-            }
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
 
-    # 回退到 legacy orchestrator
-    orchestrator = get_orchestrator()
-    exec_data = orchestrator.get_execution(execution_id)
-    if not exec_data:
-        raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
-    
-    state = exec_data["state"]
-    plan = exec_data["plan"]
-    
-    # 计算统计数据
-    total_llm_calls = sum(len(s.llm_calls) for s in state.steps)
-    total_tokens = sum(sum(c.get("total_tokens", 0) for c in s.llm_calls) for s in state.steps)
-    total_cost = sum(sum(c.get("cost_usd", 0) for c in s.llm_calls) for s in state.steps)
-    
-    # 成本分析
-    step_costs = []
-    for s in state.steps:
-        cost = sum(c.get("cost_usd", 0) for c in s.llm_calls)
-        pct = (cost / total_cost * 100) if total_cost > 0 else 0
-        step_costs.append({"step_id": s.step_id, "cost_usd": round(cost, 4), "percentage": round(pct, 1)})
-    
-    # 工具使用分析
-    tool_usage = {}
-    for s in state.steps:
-        for tc in s.tool_calls:
-            tool_name = tc.get("tool_name", "unknown")
-            tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
-    
-    # 生成优化建议
-    suggestions = []
-    if state.status == "completed":
-        if step_costs:
-            max_cost_step = max(step_costs, key=lambda x: x["cost_usd"])
-            suggestions.append({
-                "priority": "medium",
-                "category": "cost",
-                "description": f"步骤 {max_cost_step['step_id']} 消耗成本最高",
-                "action": "考虑优化该步骤的prompt或使用更便宜的模型"
-            })
-        
-        if total_llm_calls > 5:
-            suggestions.append({
-                "priority": "high",
-                "category": "parallel",
-                "description": f"执行了 {total_llm_calls} 次 LLM 调用",
-                "action": "考虑优化为并行执行"
-            })
-    
+    sup_state = supervisor_mgr.get_execution(execution_id)
+    if not sup_state:
+        raise HTTPException(status=404, detail=f"Execution not found: {execution_id}")
+
     return {
-        "execution_id": execution_id,
-        "graph_id": state.graph_id,
-        "status": state.status,
-        "input": state.input_text[:100],
-        "output": state.output[:500] if state.output else None,
-        
+        "execution_id": sup_state.execution_id,
+        "graph_id": sup_state.graph_id,
+        "status": sup_state.status,
+        "input": sup_state.input_text[:100],
+        "output": sup_state.output[:500] if sup_state.output else None,
         "summary": {
-            "total_steps": len(state.steps),
-            "completed_steps": sum(1 for s in state.steps if s.status == "completed"),
-            "failed_steps": sum(1 for s in state.steps if s.status == "failed"),
-            "total_llm_calls": total_llm_calls,
-            "total_tokens": total_tokens,
-            "total_cost_usd": round(total_cost, 4),
-            "total_duration_ms": state.elapsed_ms,
+            "total_steps": len(sup_state.agent_names),
+            "completed_steps": len(sup_state.agent_names) if sup_state.status == "completed" else 0,
+            "failed_steps": 1 if sup_state.status == "failed" else 0,
+            "total_llm_calls": sup_state.total_llm_calls,
+            "total_tokens": sup_state.total_tokens,
+            "total_cost_usd": sup_state.total_cost_usd,
+            "total_duration_ms": sup_state.elapsed_ms,
         },
-        
         "step_details": [
             {
-                "step_id": s.step_id,
-                "agent_name": s.agent_name,
-                "status": s.status,
-                "llm_calls": len(s.llm_calls),
-                "tokens": sum(c.get("total_tokens", 0) for c in s.llm_calls),
-                "cost_usd": round(sum(c.get("cost_usd", 0) for c in s.llm_calls), 4),
-                "duration_ms": 0,  # Simplified duration
-                "result": s.result[:200] if s.result else None,
-                "error": s.error,
+                "step_id": i + 1,
+                "agent_name": name,
+                "status": sup_state.status,
+                "llm_calls": 0,
+                "tokens": 0,
+                "cost_usd": 0,
+                "duration_ms": 0,
+                "result": sup_state.output[:200] if sup_state.output and i == len(sup_state.agent_names) - 1 else None,
+                "error": sup_state.error if sup_state.status == "failed" else None,
             }
-            for s in state.steps
+            for i, name in enumerate(sup_state.agent_names)
         ],
-        
         "optimization_insights": {
-            "cost_breakdown": step_costs,
-            "tool_usage": tool_usage,
-            "suggestions": suggestions,
-        }
+            "cost_breakdown": [],
+            "tool_usage": {},
+            "suggestions": [],
+        },
+    }
+
+
+@app.get("/api/execution/{execution_id}/graph")
+async def get_execution_graph(execution_id: str):
+    """获取执行图结构（Vue Flow 兼容格式）"""
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
+
+    sup_state = supervisor_mgr.get_execution(execution_id)
+    if not sup_state:
+        raise HTTPException(status=404, detail=f"Execution not found: {execution_id}")
+
+    # 从注册表获取 graph 定义
+    registry = get_registry()
+    graph_def = registry.get_graph(sup_state.graph_id)
+    if not graph_def:
+        raise HTTPException(status=404, detail=f"Graph not found: {sup_state.graph_id}")
+
+    # 构建 Vue Flow 兼容的节点和边
+    nodes = []
+    edges = []
+
+    # 获取 graph 中的 agent 节点
+    graph_nodes = graph_def.get("nodes", [])
+    graph_edges = graph_def.get("edges", [])
+
+    # 映射执行状态到节点
+    status_map = {}
+    if sup_state.status == "running":
+        # 如果正在运行，当前节点是执行中的
+        for i, name in enumerate(sup_state.agent_names):
+            status_map[name] = "running" if i == len(sup_state.agent_names) - 1 else "completed"
+    else:
+        for i, name in enumerate(sup_state.agent_names):
+            if sup_state.status == "completed":
+                status_map[name] = "completed"
+            elif sup_state.status == "failed":
+                status_map[name] = "failed" if i == len(sup_state.agent_names) - 1 else "completed"
+
+    # 创建节点
+    for i, node in enumerate(graph_nodes):
+        if node.get("type") != "agent":
+            continue
+
+        agent_id = node.get("agent_id") or node.get("data", {}).get("agent_id")
+        agent_def = registry.get_agent(agent_id) if agent_id else None
+
+        node_status = status_map.get(agent_id or "", "pending")
+        if sup_state.status == "pending":
+            node_status = "pending"
+
+        nodes.append({
+            "id": agent_id or f"agent-{i}",
+            "type": "agent",
+            "position": {"x": i * 250, "y": 100},
+            "data": {
+                "label": agent_def.get("name", node.get("data", {}).get("label", "Agent")) if agent_def else node.get("data", {}).get("label", "Agent"),
+                "status": node_status,
+                "agent_id": agent_id,
+            },
+            "style": {
+                "background": "#1f2937" if node_status == "pending" else "#1a4a2a" if node_status == "completed" else "#4a1a1a" if node_status == "failed" else "#1a3a5c",
+                "border": "#3fb950" if node_status == "completed" else "#f85149" if node_status == "failed" else "#58a6ff" if node_status == "running" else "#6e7681",
+            },
+        })
+
+    # 创建边
+    for edge in graph_edges:
+        source = None
+        target = None
+
+        for node in graph_nodes:
+            if node.get("id") == edge.get("source"):
+                source = node.get("agent_id") or node.get("data", {}).get("agent_id")
+            if node.get("id") == edge.get("target"):
+                target = node.get("agent_id") or node.get("data", {}).get("agent_id")
+
+        if source and target:
+            edge_status = "animated" if status_map.get(source) == "running" else "solid"
+            edges.append({
+                "id": f"e-{source}-{target}",
+                "source": source,
+                "target": target,
+                "type": "smoothstep",
+                "animated": edge_status == "animated",
+                "style": {
+                    "stroke": "#58a6ff" if status_map.get(source) == "running" else "#3fb950" if status_map.get(source) == "completed" else "#f85149" if status_map.get(source) == "failed" else "#6e7681",
+                },
+            })
+
+    # 如果没有边，按顺序生成线性边
+    if not edges and len(nodes) > 1:
+        for i in range(len(nodes) - 1):
+            edges.append({
+                "id": f"e-{nodes[i]['id']}-{nodes[i+1]['id']}",
+                "source": nodes[i]["id"],
+                "target": nodes[i+1]["id"],
+                "type": "smoothstep",
+                "animated": nodes[i+1]["data"]["status"] == "running",
+                "style": {
+                    "stroke": "#3fb950" if nodes[i+1]["data"]["status"] == "completed" else "#58a6ff" if nodes[i+1]["data"]["status"] == "running" else "#6e7681",
+                },
+            })
+
+    return {
+        "execution_id": execution_id,
+        "graph_id": sup_state.graph_id,
+        "status": sup_state.status,
+        "nodes": nodes,
+        "edges": edges,
     }
 
 

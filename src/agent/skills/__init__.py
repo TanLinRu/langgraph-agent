@@ -12,6 +12,8 @@ SKILLS_INDEX = """
 - **security_audit**: 安全审计与漏洞检测
 - **database_design**: 数据库设计与查询优化
 - **cli_dispatch**: 调度编码任务到外部 CLI
+- **flow_design**: 流程设计与可视化
+- **html_prototype**: HTML 原型生成
 
 使用方式：当你需要执行特定类型任务时，加载对应 Skill。
 """
@@ -479,3 +481,57 @@ __all__ = [
     "get_skill_content",
     "should_load_skill",
 ]
+
+
+SKILLS_REGISTRY["flow_design"] = {
+    "name": "flow_design",
+    "description": "业务流程设计与可视化",
+    "use_when": ["设计流程", "绘制流程图", "梳理业务逻辑", "PRD flow"],
+    "dont_use_when": ["只是写代码", "调试问题"],
+    "full_content": """你是流程设计专家。基于 PRD 生成用户流程图。
+
+分析维度：
+1. 用户角色 - 谁在使用系统
+2. 核心流程 - 主要业务流程
+3. 分支逻辑 - 条件分支
+4. 异常处理 - 错误流程
+
+输出格式：
+## 流程节点
+- 节点名称
+- 节点类型（开始/结束/操作/判断）
+- 参与者
+
+## 流程路径
+- 主路径
+- 备选路径
+- 异常路径
+
+使用 Mermaid 语法生成流程图。
+""",
+}
+
+SKILLS_REGISTRY["html_prototype"] = {
+    "name": "html_prototype",
+    "description": "HTML 原型生成",
+    "use_when": ["生成 HTML", "原型设计", "UI _mockup", "PRD prototype"],
+    "dont_use_when": ["只是讨论需求", "后端开发"],
+    "full_content": """你是 HTML 原型生成专家。基于 PRD 和流程图生成可编辑的 HTML 原型。
+
+要求：
+1. 使用 Tailwind CSS 进行样式
+2. 响应式布局
+3. 交互效果（hover, focus, active）
+4. 可编辑的表单元素
+
+输出：
+- 单文件 HTML
+- 内联 CSS
+- 基础 JavaScript 交互
+
+禁止：
+- 外部依赖（除 Tailwind CDN）
+- 服务器端代码
+- 数据库操作
+""",
+}
