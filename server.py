@@ -3,9 +3,11 @@ FastAPI 后端 - 为 Vue Chat UI 提供 HTTP 接口
 """
 import os
 import sys
+import uuid
 import logging
 import time
 import json
+from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -28,8 +30,7 @@ from src.agent.skills import SKILLS_REGISTRY, get_skill, SKILLS_INDEX
 from src.agent.tools import TOOLS
 from src.agent.registry import get_registry
 from src.agent.orchestrator import get_orchestrator
-# DEPRECATED: orchestrator 已废弃，请使用 SupervisorManager
-# from src.agent.orchestrator import get_orchestrator
+from src.agent.orchestrator_v2 import DynamicOrchestrator, get_orchestration, list_orchestrations
 from src.agent.supervisor import get_supervisor_manager, SupervisorManager
 from src.agent.event_bus import get_event_bus, ExecutionEvent
 from src.agent.metrics_collector import get_metrics_collector
@@ -115,6 +116,10 @@ async def lifespan(app: FastAPI):
     # 初始化 Supervisor Manager
     supervisor_mgr = get_supervisor_manager(registry, agent.llm, TOOLS)
     app.state.supervisor_mgr = supervisor_mgr
+
+    # 初始化 Dynamic Orchestrator
+    dynamic_orchestrator = DynamicOrchestrator(agent.llm, registry, TOOLS)
+    app.state.dynamic_orchestrator = dynamic_orchestrator
     
     # 初始化 Metrics
     metrics_collector = get_metrics_collector()
@@ -1167,6 +1172,124 @@ async def get_execution_graph(execution_id: str):
 
 
 # ========== 实时事件 SSE 端点 ==========
+
+
+# ========== Dynamic Orchestrator 端点 ==========
+
+class OrchestrateRequest(BaseModel):
+    message: str
+    thread_id: str = "default"
+
+
+class RollbackRequest(BaseModel):
+    step_id: str
+    reason: str = ""
+
+
+class ApproveRequest(BaseModel):
+    approved: bool = True
+
+
+@app.post("/api/orchestrate")
+async def start_orchestration(req: OrchestrateRequest):
+    """启动动态编排：LLM 分析任务 → 生成 DAG → 异步执行"""
+    import asyncio as _asyncio
+    orch: DynamicOrchestrator = app.state.dynamic_orchestrator
+    orchestration_id = f"orch-{uuid.uuid4().hex[:8]}"
+
+    async def _run():
+        try:
+            await orch.plan(orchestration_id, req.message, req.thread_id)
+            await orch.execute(orchestration_id)
+        except Exception as e:
+            logger.error(f"[Orchestrate] Background execution failed: {e}", exc_info=True)
+            state = get_orchestration(orchestration_id)
+            if state:
+                state.status = "failed"
+                state.updated_at = datetime.now().isoformat()
+
+    _asyncio.create_task(_run())
+    return {
+        "orchestration_id": orchestration_id,
+        "status": "planning",
+        "thread_id": req.thread_id,
+    }
+
+
+@app.get("/api/orchestrate/{orchestration_id}/state")
+async def get_orchestration_state(orchestration_id: str):
+    """获取编排状态"""
+    state = get_orchestration(orchestration_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Orchestration not found")
+    return {
+        "orchestration_id": state.orchestration_id,
+        "thread_id": state.thread_id,
+        "input_text": state.input_text,
+        "plan_summary": state.plan_summary,
+        "steps": [
+            {
+                "step_id": s.step_id,
+                "agent_id": s.agent_id,
+                "agent_name": s.agent_name,
+                "description": s.description,
+                "depends_on": s.depends_on,
+                "status": s.status,
+                "result": s.result,
+                "error": s.error,
+                "started_at": s.started_at,
+                "completed_at": s.completed_at,
+                "duration_ms": s.duration_ms,
+            }
+            for s in state.steps
+        ],
+        "status": state.status,
+        "current_step_id": state.current_step_id,
+        "final_output": state.final_output,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+        "replan_count": state.replan_count,
+    }
+
+
+@app.post("/api/orchestrate/{orchestration_id}/rollback")
+async def rollback_orchestration(orchestration_id: str, req: RollbackRequest):
+    """回退到指定步骤并重新执行"""
+    orch: DynamicOrchestrator = app.state.dynamic_orchestrator
+    state = get_orchestration(orchestration_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Orchestration not found")
+    try:
+        result = await orch.rollback(orchestration_id, req.step_id, req.reason)
+        downstream = orch._get_downstream_steps(result.steps, req.step_id)
+        return {
+            "orchestration_id": orchestration_id,
+            "status": "running",
+            "rolled_back_to": req.step_id,
+            "steps_reset": list(downstream),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/orchestrate/{orchestration_id}/approve")
+async def approve_orchestration_replan(orchestration_id: str, req: ApproveRequest):
+    """批准或拒绝重规划"""
+    orch: DynamicOrchestrator = app.state.dynamic_orchestrator
+    state = get_orchestration(orchestration_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Orchestration not found")
+    await orch.approve_replan(orchestration_id, req.approved)
+    return {
+        "orchestration_id": orchestration_id,
+        "approved": req.approved,
+    }
+
+
+@app.get("/api/orchestrations")
+async def list_all_orchestrations():
+    """列出所有编排"""
+    return {"orchestrations": list_orchestrations(), "count": len(list_orchestrations())}
 
 @app.get("/api/events/stream")
 async def events_stream():

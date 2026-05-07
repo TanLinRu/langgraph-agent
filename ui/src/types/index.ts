@@ -267,3 +267,33 @@ export interface TabDef {
   label: string
   icon: string
 }
+
+// ========== Dynamic Orchestrator ==========
+
+export interface OrchestratorStep {
+  step_id: string
+  agent_id: string
+  agent_name: string
+  description: string
+  depends_on: string[]
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  result?: string
+  error?: string
+  started_at?: string
+  completed_at?: string
+  duration_ms: number
+}
+
+export interface OrchestratorState {
+  orchestration_id: string
+  thread_id: string
+  input_text: string
+  plan_summary: string
+  steps: OrchestratorStep[]
+  status: 'planning' | 'running' | 'completed' | 'failed' | 'rolled_back'
+  current_step_id?: string
+  final_output?: string
+  created_at: string
+  updated_at: string
+  replan_count: number
+}

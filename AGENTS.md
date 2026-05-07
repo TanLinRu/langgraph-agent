@@ -36,15 +36,20 @@ python server.py --both     # HTTP + ACP 同时运行
 Visual chat interface with request details per turn.
 
 ```bash
-# Terminal 1: API server
+# Terminal 1: API server (port 8000)
 python server.py
 
-# Terminal 2: Frontend
+# Terminal 2: Frontend (port 3000)
 cd ui && npm install && npm run dev
 ```
 
 Open `http://localhost:3000` in browser.
 Each reply has an **expand detail** button showing full messages, tool calls, and metrics.
+
+**UI Proxy Config** (`ui/vite.config.ts`): Frontend runs on :3000, proxies to backend :8000.
+- `/api/chat` → `/chat` (backend)
+- `/api/*` → `/api/*` (backend)
+- Other endpoints: `/chat`, `/metrics`, `/archive`
 
 ## Key Facts
 

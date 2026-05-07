@@ -4,6 +4,7 @@ import TriggerNode from './TriggerNode.vue'
 import ConditionNode from './ConditionNode.vue'
 import LoopNode from './LoopNode.vue'
 import OutputNode from './OutputNode.vue'
+import OrchestratorNode from './OrchestratorNode.vue'
 
 export const nodeTypes = markRaw({
   agent: AgentNode,
@@ -11,4 +12,5 @@ export const nodeTypes = markRaw({
   condition: ConditionNode,
   loop: LoopNode,
   output: OutputNode,
+  orchestrator: OrchestratorNode,
 })

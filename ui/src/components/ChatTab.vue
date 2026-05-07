@@ -2,14 +2,17 @@
 import { ref, nextTick, onMounted, computed } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useDashboardStore } from '../stores/dashboard'
+import { useOrchestratorStore } from '../stores/orchestrator'
 import { formatTime, truncate } from '../utils/format'
 import DashboardSidebar from './dashboard/DashboardSidebar.vue'
+import WorkflowSidebar from './WorkflowSidebar.vue'
 import ToolInvocationCard from './ToolInvocationCard.vue'
 import ExecutionFlow from './ExecutionFlow.vue'
 import type { ChatTurn, ToolInvocation, ExecutionGraphData } from '../types'
 
 const chat = useChatStore()
 const dashboard = useDashboardStore()
+const orchestrator = useOrchestratorStore()
 const chatArea = ref<HTMLElement>()
 
 function scrollToBottom() {
@@ -69,6 +72,9 @@ async function sendMessage() {
     currentTurn.metrics = data.metrics || {}
     currentTurn.compression_count = data.compression_count
     currentTurn.elapsed_sec = data.elapsed_sec
+
+    // Kick off dynamic orchestration in parallel (non-blocking)
+    orchestrator.startOrchestration(text, threadId).catch(() => { /* ignore */ })
 
     // 转换 tool_calls 到 toolInvocations
     if (data.tool_calls && data.tool_calls.length > 0) {
@@ -241,6 +247,7 @@ onMounted(() => {
         </div>
       </div>
 
+      <WorkflowSidebar />
       <DashboardSidebar />
     </div>
   </div>

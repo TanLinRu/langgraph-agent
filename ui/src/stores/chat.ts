@@ -154,6 +154,17 @@ export const useChatStore = defineStore('chat', () => {
       currentTurn.compression_count = data.compression_count
       currentTurn.elapsed_sec = data.elapsed_sec
 
+      // 如果是新 session，添加到列表
+      if (!sessions.value.find(s => s.thread_id === threadId)) {
+        sessions.value.unshift({
+          thread_id: threadId,
+          preview: text.substring(0, 50),
+          metadata: {},
+          updated_at: new Date().toISOString()
+        })
+        selectedSession.value = threadId
+      }
+
       await nextTick()
       scrollToBottom()
     } catch (e) {

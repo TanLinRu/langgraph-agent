@@ -99,3 +99,12 @@ def get_event_bus() -> EventBus:
     if _event_bus is None:
         _event_bus = EventBus()
     return _event_bus
+
+
+async def publish_workflow_event(event_type: str, orchestration_id: str, data: dict):
+    """发布编排器工作流事件的便捷方法"""
+    bus = get_event_bus()
+    await bus.publish(ExecutionEvent(
+        event_type=event_type,
+        data={"orchestration_id": orchestration_id, **data},
+    ))

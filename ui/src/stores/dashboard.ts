@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, onUnmounted } from 'vue'
 import type { AgentActivity, SkillTrigger, TaskProgress, Observation } from '../types'
+import { useOrchestratorStore } from './orchestrator'
 
 export const useDashboardStore = defineStore('dashboard', () => {
   const isOpen = ref(false)
@@ -81,6 +82,23 @@ export const useDashboardStore = defineStore('dashboard', () => {
         handleMetricUpdate(data.data, data.timestamp)
       } catch { /* ignore */ }
     })
+
+    // Orchestrator workflow events
+    const orchestrator = useOrchestratorStore()
+    const orchestratorEvents: Record<string, (data: any) => void> = {
+      'workflow_plan': orchestrator.handleWorkflowPlan,
+      'step_update': orchestrator.handleStepUpdate,
+      'workflow_replan': orchestrator.handleWorkflowReplan,
+      'workflow_complete': orchestrator.handleWorkflowComplete,
+    }
+    for (const [eventType, handler] of Object.entries(orchestratorEvents)) {
+      eventSource.addEventListener(eventType, (e) => {
+        try {
+          const data = JSON.parse(e.data)
+          handler(data.data)
+        } catch { /* ignore */ }
+      })
+    }
 
     eventSource.onerror = () => {
       connected.value = false
