@@ -41,6 +41,7 @@ def _deduplicate_messages(messages: list) -> list:
 
     seen = set()
     result = []
+    system_count = 0
 
     for msg in messages:
         role = _msg_get(msg, "role", "")
@@ -49,11 +50,16 @@ def _deduplicate_messages(messages: list) -> list:
         if not content:
             content = str(msg)
 
-        key = f"{role}:{content[:100]}"
-        if key in seen:
-            continue
+        if role == "system":
+            if system_count > 0:
+                continue
+            system_count += 1
+        else:
+            key = f"{role}:{content[:100]}"
+            if key in seen:
+                continue
+            seen.add(key)
 
-        seen.add(key)
         result.append(msg)
 
     return result
@@ -207,10 +213,18 @@ class Agent:
         return "think" if should_continue else "end"
 
     def _node_init(self, state: AgentState) -> AgentState:
-        """初始化节点"""
+        """初始化节点 - 避免重复添加 system 消息"""
         thread_id = state.get("thread_id", "default")
-        context = self.initializer.initialize(thread_id)
+        existing_messages = state.get("messages", [])
 
+        has_system = any(
+            _msg_get(m, "role") == "system" for m in existing_messages
+        )
+
+        if has_system:
+            return {"task_status": "in_progress"}
+
+        context = self.initializer.initialize(thread_id)
         system_content = f"{SYSTEM_PROMPT}\n\n---\n\n{SKILLS_INDEX}"
         messages = [{"role": "system", "content": system_content}]
 
@@ -408,9 +422,10 @@ Status: {sop_state.get('status')}
         return state
 
     def _node_save(self, state: AgentState) -> AgentState:
-        """保存节点"""
+        """保存节点 - 先去重再保存"""
         thread_id = state.get("thread_id", "default")
         messages = state.get("messages", [])
+        messages = _deduplicate_messages(messages)
         task_status = state.get("task_status")
 
         logger.info(f"[Save] Thread: {thread_id}, Messages: {len(messages)}, Status: {task_status}")
