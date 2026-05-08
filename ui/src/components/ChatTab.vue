@@ -73,8 +73,12 @@ async function sendMessage() {
     currentTurn.compression_count = data.compression_count
     currentTurn.elapsed_sec = data.elapsed_sec
 
-    // Kick off dynamic orchestration in parallel (non-blocking)
-    orchestrator.startOrchestration(text, threadId).catch(() => { /* ignore */ })
+    // Kick off dynamic orchestration only for complex tasks
+    const complexKeywords = ['写', '做', '开发', '实现', '创建', '分析', '处理', '构建', '生成', '修复', 'debug', 'build', 'create', 'implement', 'analyze']
+    const isComplexTask = complexKeywords.some(kw => text.toLowerCase().includes(kw.toLowerCase()))
+    if (isComplexTask) {
+      orchestrator.startOrchestration(text, threadId).catch(() => { /* ignore */ })
+    }
 
     // 转换 tool_calls 到 toolInvocations
     if (data.tool_calls && data.tool_calls.length > 0) {
