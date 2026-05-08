@@ -346,8 +346,26 @@ async def get_session(thread_id: str):
     global agent
     if not agent:
         return {"thread_id": thread_id, "messages": [], "count": 0}
-    messages = agent.long_term.load_session_messages(thread_id)
+    messages = agent.long_term.load_session_messages(thread_id, max_messages=20)
     return {"thread_id": thread_id, "messages": messages, "count": len(messages)}
+
+
+@app.delete("/api/sessions/{thread_id}")
+async def delete_session(thread_id: str):
+    """删除指定会话"""
+    global agent
+    if not agent:
+        return {"status": "error", "error": "Agent not initialized"}
+    try:
+        session_file = agent.long_term.config.memory_dir / "sessions" / f"{thread_id}.jsonl"
+        if session_file.exists():
+            session_file.unlink()
+        agent.long_term._db_conn.execute("DELETE FROM sessions WHERE thread_id = ?", (thread_id,))
+        agent.long_term._db_conn.commit()
+        return {"status": "success", "thread_id": thread_id}
+    except Exception as e:
+        logger.error(f"Failed to delete session: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 @app.get("/api/tools")

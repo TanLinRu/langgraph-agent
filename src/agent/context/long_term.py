@@ -215,8 +215,8 @@ class LongTermManager:
             for row in cursor.fetchall()
         ]
 
-    def load_session_messages(self, thread_id: str) -> list:
-        """加载指定会话的所有消息（已去重）"""
+    def load_session_messages(self, thread_id: str, max_messages: int = 20) -> list:
+        """加载指定会话的消息（已去重，最多 max_messages 条）"""
         session_file = self.config.memory_dir / "sessions" / f"{thread_id}.jsonl"
 
         if not session_file.exists():
@@ -228,7 +228,8 @@ class LongTermManager:
                 data = json.loads(line)
                 messages.extend(data.get("messages", []))
 
-        return _deduplicate_messages(messages)
+        deduped = _deduplicate_messages(messages)
+        return deduped[-max_messages:]
 
     def get_latest_thread(self) -> Optional[str]:
         """获取最近会话 ID"""
