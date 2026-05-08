@@ -4,8 +4,18 @@ import type { AgentActivity, SkillTrigger, TaskProgress, Observation } from '../
 import { useOrchestratorStore } from './orchestrator'
 
 export const useDashboardStore = defineStore('dashboard', () => {
-  const isOpen = ref(false)
+  const isOpen = ref(true)
   const connected = ref(false)
+
+  // Auto-connect on store creation
+  if (typeof window !== 'undefined') {
+    setTimeout(() => {
+      if (isOpen.value && !connected.value) {
+        connectSSE()
+      }
+    }, 500)
+  }
+
   const agentActivities = ref<Map<string, AgentActivity>>(new Map())
   const skillTriggers = ref<SkillTrigger[]>([])
   const taskProgresses = ref<Map<string, TaskProgress>>(new Map())

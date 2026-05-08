@@ -8,10 +8,16 @@
 
 ## 当前进度
 
-### Phase 1: 消息去重
+### Phase 1: 消息去重 (已修复)
 - [x] 后端：AgentState messages 去重 (_deduplicate_messages in agent.py)
 - [x] 后端：long_term.py save/load 去重
 - [x] 前端：chat.ts loadSession 去重
+- [x] 修复：_node_init 避免重复添加 system 消息
+- [x] 修复：_node_save 保存前先去重
+
+### 待调查
+- [ ] 工作流 SSE 流式展示问题
+- [ ] Stream 实时更新问题
 
 ### Phase 2: 工作流流式 + 中断恢复
 - [x] 后端：新增 /api/execution/{id}/interrupt 端点
