@@ -90,12 +90,20 @@ onMounted(() => {
           <h4>执行状态</h4>
           <div class="result-header">
             <span class="status-badge" :class="agents.currentExecution.status">
-              {{ agents.currentExecution.status === 'running' ? '运行中' : agents.currentExecution.status === 'completed' ? '已完成' : '失败' }}
+              {{ agents.currentExecution.status === 'running' ? '运行中' : agents.currentExecution.status === 'completed' ? '已完成' : agents.currentExecution.status === 'interrupted' ? '已中断' : '失败' }}
             </span>
             <span class="result-stats">
               调用: {{ agents.currentExecution.total_llm_calls }} 次
               费用: ${{ agents.currentExecution.total_cost_usd?.toFixed(4) }}
             </span>
+            <div class="execution-controls">
+              <button v-if="agents.currentExecution.status === 'running'" class="interrupt-btn" @click="agents.interruptExecution()">
+                ⏹ 中断
+              </button>
+              <button v-if="agents.currentExecution.status === 'interrupted' && agents.currentExecution.can_resume" class="resume-btn" @click="agents.resumeExecution()">
+                ▶ 恢复
+              </button>
+            </div>
           </div>
 
           <div class="steps-result">
@@ -351,6 +359,40 @@ onMounted(() => {
   background: #21262d;
   color: #6e7681;
   cursor: not-allowed;
+}
+
+.execution-controls {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.interrupt-btn {
+  background: #da3633;
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.interrupt-btn:hover {
+  background: #b62324;
+}
+
+.resume-btn {
+  background: #238636;
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.resume-btn:hover {
+  background: #2ea043;
 }
 
 .plan-preview {

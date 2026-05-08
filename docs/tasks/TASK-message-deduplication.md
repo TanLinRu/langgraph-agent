@@ -22,7 +22,8 @@
 
 ### Phase 3: 子Agent审查机制
 - [x] 后端：新增 review_agent_response() 方法 (SupervisorManager)
-- [ ] 后端：在 stream_run 中集成审查回调
+- [x] 后端：在 run() 中集成审查（通过 AGENT_REVIEW_ENABLED 环境变量启用）
+- [x] 前端：AgentsTab.vue 添加中断/恢复按钮
 
 ## 下一步计划
 

@@ -7,6 +7,7 @@ Supervisor Manager
 import uuid
 import time
 import logging
+import os
 from datetime import datetime
 from typing import Optional, AsyncGenerator
 from dataclasses import dataclass, field
@@ -309,6 +310,20 @@ class SupervisorManager:
                 }
                 for m in messages
             ]
+
+            # 执行后审查（可选）
+            review_enabled = os.getenv("AGENT_REVIEW_ENABLED", "false").lower() == "true"
+            if review_enabled and state.agent_names:
+                for agent_name in state.agent_names:
+                    review_result = await self.review_agent_response(
+                        agent_name=agent_name,
+                        task=input_text,
+                        output=state.output or ""
+                    )
+                    if review_result.get("review") == "retry":
+                        logger.warning(f"[Supervisor] Review flagged retry for {agent_name}: {review_result.get('reason')}")
+                        state.status = "needs_retry"
+                        break
 
         except Exception as e:
             logger.error(f"[Supervisor] Execution failed: {e}", exc_info=True)
