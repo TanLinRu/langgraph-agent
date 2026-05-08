@@ -19,6 +19,18 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function deduplicateMessages(messages: Message[]): Message[] {
+    const seen = new Set<string>()
+    const result: Message[] = []
+    for (const msg of messages) {
+      const key = `${msg.role}:${(msg.content || '').substring(0, 100)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      result.push(msg)
+    }
+    return result
+  }
+
   async function loadSessions() {
     sessionsLoading.value = true
     try {
@@ -44,11 +56,14 @@ export const useChatStore = defineStore('chat', () => {
       turns.value = []
       turnId = 0
 
+      const messages = data.messages || []
+      const uniqueMessages = deduplicateMessages(messages)
+
       let currentTurn: ChatTurn | null = null
       let toolCalls: ToolCall[] = []
       let reply = ''
 
-      for (const msg of data.messages || []) {
+      for (const msg of uniqueMessages) {
         const role = msg.role
         if (role === 'user') {
           if (currentTurn) {

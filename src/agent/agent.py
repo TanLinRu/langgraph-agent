@@ -33,6 +33,31 @@ def _msg_get(msg, key, default=None):
         return msg.get(key, default)
     return getattr(msg, key, default)
 
+
+def _deduplicate_messages(messages: list) -> list:
+    """去重消息列表，避免重复的 system/user 消息"""
+    if not messages:
+        return []
+
+    seen = set()
+    result = []
+
+    for msg in messages:
+        role = _msg_get(msg, "role", "")
+        content = _msg_get(msg, "content", "")
+
+        if not content:
+            content = str(msg)
+
+        key = f"{role}:{content[:100]}"
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(msg)
+
+    return result
+
 MODEL_COSTS = {
     "gpt-4": {"prompt": 0.03, "completion": 0.06},
     "gpt-4o": {"prompt": 0.005, "completion": 0.015},
@@ -409,7 +434,8 @@ Status: {sop_state.get('status')}
             self._build_graph()
 
         initial_state = create_initial_state(thread_id)
-        initial_state["messages"] = [{"role": "user", "content": input_text}]
+        new_user_msg = {"role": "user", "content": input_text}
+        initial_state["messages"] = [new_user_msg]
         if sop_name:
             initial_state["sop_name"] = sop_name
             logger.info(f"[Run] SOP resume enabled: {sop_name}")
@@ -419,7 +445,8 @@ Status: {sop_state.get('status')}
         checkpoint = self.checkpointer.get(config)
         if checkpoint and checkpoint.get("channel_values", {}).get("messages"):
             existing = checkpoint["channel_values"]["messages"]
-            initial_state["messages"] = existing + [{"role": "user", "content": input_text}]
+            existing = _deduplicate_messages(existing)
+            initial_state["messages"] = existing + [new_user_msg]
             logger.info(f"[Resume] Loaded {len(existing)} prior messages for thread={thread_id}")
 
         try:
@@ -435,7 +462,8 @@ Status: {sop_state.get('status')}
             self._build_graph()
 
         initial_state = create_initial_state(thread_id)
-        initial_state["messages"] = [{"role": "user", "content": input_text}]
+        new_user_msg = {"role": "user", "content": input_text}
+        initial_state["messages"] = [new_user_msg]
         if sop_name:
             initial_state["sop_name"] = sop_name
 
@@ -444,7 +472,8 @@ Status: {sop_state.get('status')}
         checkpoint = self.checkpointer.get(config)
         if checkpoint and checkpoint.get("channel_values", {}).get("messages"):
             existing = checkpoint["channel_values"]["messages"]
-            initial_state["messages"] = existing + [{"role": "user", "content": input_text}]
+            existing = _deduplicate_messages(existing)
+            initial_state["messages"] = existing + [new_user_msg]
 
         for event in self._graph.stream(initial_state, config, stream_mode="values"):
             yield event

@@ -204,7 +204,7 @@ export const useAgentsStore = defineStore('agents', () => {
         const data = await res.json()
         currentExecution.value = { ...currentExecution.value, ...data }
 
-        if (data.status === 'completed' || data.status === 'failed') {
+        if (data.status === 'completed' || data.status === 'failed' || data.status === 'interrupted') {
           const reportRes = await fetch(`/api/execution/${executionId}/report`)
           executionReport.value = await reportRes.json()
           break
@@ -216,6 +216,82 @@ export const useAgentsStore = defineStore('agents', () => {
         console.error('Polling error:', e)
         break
       }
+    }
+  }
+
+  async function runStream() {
+    if (!selectedAgentGraph.value || !executionInput.value.trim()) return
+    executionLoading.value = true
+    try {
+      const res = await fetch('/api/execution/run/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          graph_id: selectedAgentGraph.value,
+          input_text: executionInput.value,
+          approved: true,
+        }),
+      })
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (reader) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6))
+              handleStreamEvent(event)
+            } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Stream error:', e)
+    } finally {
+      executionLoading.value = false
+      showPlanApproval.value = false
+    }
+  }
+
+  function handleStreamEvent(event: any) {
+    if (event.type === 'start') {
+      currentExecution.value = { execution_id: event.execution_id, status: 'running' }
+    } else if (event.type === 'update') {
+      nodeStatuses.value = { ...nodeStatuses.value, ...event.data }
+    } else if (event.type === 'done') {
+      currentExecution.value.status = 'completed'
+      pollExecutionState(event.execution_id)
+    } else if (event.type === 'error') {
+      currentExecution.value.status = 'failed'
+      currentExecution.value.error = event.error
+    }
+  }
+
+  async function interruptExecution() {
+    if (!currentExecution.value.execution_id) return
+    try {
+      await fetch(`/api/execution/${currentExecution.value.execution_id}/interrupt`, { method: 'POST' })
+      currentExecution.value.status = 'interrupted'
+    } catch (e) {
+      console.error('Interrupt error:', e)
+    }
+  }
+
+  async function resumeExecution() {
+    if (!currentExecution.value.execution_id) return
+    try {
+      await fetch(`/api/execution/${currentExecution.value.execution_id}/resume`, { method: 'POST' })
+      currentExecution.value.status = 'running'
+      pollExecutionState(currentExecution.value.execution_id)
+    } catch (e) {
+      console.error('Resume error:', e)
     }
   }
 
@@ -259,6 +335,7 @@ export const useAgentsStore = defineStore('agents', () => {
     createAgent, updateAgent, deleteAgent,
     openNewAgent, openEditAgent, resetAgentForm,
     generatePlan, runWithApproval, pollExecutionState,
+    runStream, interruptExecution, resumeExecution,
     // Aliases
     list, graphs, showModal, editingId, form, selectedGraphId,
     openNew, openEdit, loadGraphs, deleteGraph, approveExecution,

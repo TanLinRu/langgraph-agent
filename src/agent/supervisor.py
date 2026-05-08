@@ -40,6 +40,8 @@ class SupervisorExecutionState:
     elapsed_ms: int = 0
     error: Optional[str] = None
     agent_names: list = field(default_factory=list)
+    interrupted: bool = False
+    can_resume: bool = False
 
 
 class SupervisorManager:
@@ -379,9 +381,82 @@ class SupervisorManager:
                 "status": s.status,
                 "agent_names": s.agent_names,
                 "start_time": s.start_time,
+                "interrupted": s.interrupted,
+                "can_resume": s.can_resume,
             }
             for eid, s in _supervisor_executions.items()
         ]
+
+    def interrupt(self, execution_id: str) -> dict:
+        """中断指定执行"""
+        state = _supervisor_executions.get(execution_id)
+        if not state:
+            return {"status": "error", "error": f"Execution not found: {execution_id}"}
+
+        if state.status == "completed":
+            return {"status": "error", "error": "Execution already completed"}
+
+        state.interrupted = True
+        state.status = "interrupted"
+        logger.info(f"[Supervisor] Interrupted execution: {execution_id}")
+
+        return {"status": "success", "execution_id": execution_id}
+
+    def resume(self, execution_id: str) -> dict:
+        """恢复指定执行"""
+        state = _supervisor_executions.get(execution_id)
+        if not state:
+            return {"status": "error", "error": f"Execution not found: {execution_id}"}
+
+        if not state.can_resume:
+            return {"status": "error", "error": "Execution cannot be resumed"}
+
+        state.interrupted = False
+        state.status = "running"
+        state.can_resume = False
+        logger.info(f"[Supervisor] Resumed execution: {execution_id}")
+
+        return {"status": "success", "execution_id": execution_id}
+
+    async def review_agent_response(
+        self, agent_name: str, task: str, output: str
+    ) -> dict:
+        """审查子Agent的响应，返回审查结果"""
+        if not self.llm:
+            return {"review": "pass", "reason": "No LLM available, auto-pass"}
+
+        review_prompt = f"""请审查以下子Agent的输出是否满足要求：
+
+任务: {task}
+Agent: {agent_name}
+输出: {output[:1000]}
+
+请判断：
+- 是否有错误或遗漏？
+- 是否需要重试？
+- 是否可以直接继续？
+
+请返回JSON格式：
+{{"review": "pass"|"retry"|"fix", "reason": "具体原因", "suggestion": "如果需要修正，具体建议"}}
+"""
+        try:
+            response = await self.llm.ainvoke([{"role": "user", "content": review_prompt}])
+            content = response.content if hasattr(response, 'content') else str(response)
+
+            import json
+            import re
+            match = re.search(r'\{[^}]+\}', content, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                return {
+                    "review": result.get("review", "pass"),
+                    "reason": result.get("reason", ""),
+                    "suggestion": result.get("suggestion", "")
+                }
+        except Exception as e:
+            logger.warning(f"[Supervisor] Review failed: {e}")
+
+        return {"review": "pass", "reason": "Review error, default pass"}
 
 
 # 全局实例

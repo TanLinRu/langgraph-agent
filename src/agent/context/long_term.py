@@ -26,6 +26,32 @@ def _msg_content(msg):
     return getattr(msg, "content", str(msg))
 
 
+def _msg_role(msg):
+    """Get role from message"""
+    if isinstance(msg, dict):
+        return msg.get("role", "")
+    return getattr(msg, "role", "")
+
+
+def _deduplicate_messages(messages: list) -> list:
+    """去重消息列表"""
+    if not messages:
+        return []
+    seen = set()
+    result = []
+    for msg in messages:
+        role = _msg_role(msg)
+        content = _msg_content(msg)
+        if not content:
+            content = str(msg)
+        key = f"{role}:{content[:100]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(msg)
+    return result
+
+
 class LongTermManager:
     """长期上下文管理器"""
 
@@ -190,7 +216,7 @@ class LongTermManager:
         ]
 
     def load_session_messages(self, thread_id: str) -> list:
-        """加载指定会话的所有消息"""
+        """加载指定会话的所有消息（已去重）"""
         session_file = self.config.memory_dir / "sessions" / f"{thread_id}.jsonl"
 
         if not session_file.exists():
@@ -202,7 +228,7 @@ class LongTermManager:
                 data = json.loads(line)
                 messages.extend(data.get("messages", []))
 
-        return messages
+        return _deduplicate_messages(messages)
 
     def get_latest_thread(self) -> Optional[str]:
         """获取最近会话 ID"""

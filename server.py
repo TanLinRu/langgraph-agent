@@ -945,6 +945,8 @@ async def get_execution_state(execution_id: str):
         "total_llm_calls": sup_state.total_llm_calls,
         "total_cost_usd": sup_state.total_cost_usd,
         "elapsed_ms": sup_state.elapsed_ms,
+        "interrupted": sup_state.interrupted,
+        "can_resume": sup_state.can_resume,
         "steps": [
             {
                 "step_id": i + 1,
@@ -957,6 +959,32 @@ async def get_execution_state(execution_id: str):
             for i, name in enumerate(sup_state.agent_names)
         ],
     }
+
+
+@app.post("/api/execution/{execution_id}/interrupt")
+async def interrupt_execution(execution_id: str):
+    """中断执行"""
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
+
+    result = supervisor_mgr.interrupt(execution_id)
+    if result.get("status") == "error":
+        raise HTTPException(status=404, detail=result.get("error"))
+    return result
+
+
+@app.post("/api/execution/{execution_id}/resume")
+async def resume_execution(execution_id: str):
+    """恢复执行"""
+    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
+    if not supervisor_mgr:
+        raise HTTPException(status=400, detail="SupervisorManager not available")
+
+    result = supervisor_mgr.resume(execution_id)
+    if result.get("status") == "error":
+        raise HTTPException(status=404, detail=result.get("error"))
+    return result
 
 
 @app.get("/api/execution/current")
