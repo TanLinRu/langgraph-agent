@@ -50,12 +50,14 @@ def _deduplicate_messages(messages: list) -> list:
         if not content:
             content = str(msg)
 
+        content_normalized = content.strip()[:100]
+
         if role == "system":
             if system_count > 0:
                 continue
             system_count += 1
         else:
-            key = f"{role}:{content[:100]}"
+            key = f"{role}:{content_normalized}"
             if key in seen:
                 continue
             seen.add(key)

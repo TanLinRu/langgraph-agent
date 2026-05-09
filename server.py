@@ -232,6 +232,8 @@ async def chat(req: ChatRequest):
     graph_result = result["result"]
     messages_raw = graph_result.get("messages", [])
 
+    from src.agent.agent import _deduplicate_messages
+    messages_raw = _deduplicate_messages(messages_raw)
     messages = [_extract_msg(m) for m in messages_raw]
 
     # Collect tool calls and results
