@@ -30,7 +30,7 @@ from src.agent.skills import SKILLS_REGISTRY, get_skill, SKILLS_INDEX
 from src.agent.tools import TOOLS
 from src.agent.registry import get_registry
 from src.agent.orchestrator import get_orchestrator
-from src.agent.orchestrator_v2 import DynamicOrchestrator, get_orchestration, list_orchestrations
+from src.agent.orchestrator_v2 import DynamicOrchestrator, get_orchestration, list_orchestrations, restore_orchestrations
 from src.agent.task_classifier import classify_task, get_routing_decision, should_orchestrate
 from src.agent.supervisor import get_supervisor_manager, SupervisorManager
 from src.agent.event_bus import get_event_bus, ExecutionEvent
@@ -121,6 +121,10 @@ async def lifespan(app: FastAPI):
     # 初始化 Dynamic Orchestrator
     dynamic_orchestrator = DynamicOrchestrator(agent.llm, registry, TOOLS)
     app.state.dynamic_orchestrator = dynamic_orchestrator
+
+    restored = restore_orchestrations(config.long_term.memory_dir)
+    if restored > 0:
+        logger.info(f"[Startup] Restored {restored} incomplete orchestrations from checkpoints")
     
     # 初始化 Metrics
     metrics_collector = get_metrics_collector()
@@ -1368,6 +1372,36 @@ async def approve_orchestration_step(
 async def list_all_orchestrations():
     """列出所有编排"""
     return {"orchestrations": list_orchestrations(), "count": len(list_orchestrations())}
+
+
+@app.post("/api/orchestrate/{orchestration_id}/resume")
+async def resume_orchestration(orchestration_id: str):
+    """恢复并继续执行工作流"""
+    state = get_orchestration(orchestration_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Orchestration not found")
+
+    if state.status not in ("planning", "running"):
+        return {
+            "status": "error",
+            "message": f"Cannot resume: current status is {state.status}",
+        }
+
+    orch: DynamicOrchestrator = app.state.dynamic_orchestrator
+    result = await orch.execute(orchestration_id)
+    return {
+        "orchestration_id": orchestration_id,
+        "status": result.status,
+        "steps": len(result.steps),
+    }
+
+
+@app.get("/api/orchestrations/checkpoints")
+async def list_checkpointed_orchestrations():
+    """列出检查点中的工作流"""
+    from src.agent.orchestrator_checkpoint import get_checkpoint
+    checkpoint = get_checkpoint()
+    return {"orchestrations": checkpoint.list_all(), "count": len(checkpoint.list_all())}
 
 @app.get("/api/events/stream")
 async def events_stream():

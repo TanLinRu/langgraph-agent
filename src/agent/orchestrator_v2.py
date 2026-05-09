@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 from .state import OrchestratorStep, OrchestratorState
 from .event_bus import get_event_bus, ExecutionEvent, publish_workflow_event
 from .skills import SKILLS_REGISTRY, get_skill_content
+from .orchestrator_checkpoint import get_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,17 @@ def list_orchestrations() -> list[dict]:
         }
         for oid, s in _orchestrations.items()
     ]
+
+
+def restore_orchestrations(memory_dir: str = "memory") -> int:
+    """从检查点恢复未完成的工作流"""
+    from .orchestrator_checkpoint import get_checkpoint
+    checkpoint = get_checkpoint(memory_dir)
+    incomplete = checkpoint.load_incomplete()
+    for state in incomplete:
+        _orchestrations[state.orchestration_id] = state
+        logger.info(f"[Orchestrator] Restored: {state.orchestration_id} (status={state.status})")
+    return len(incomplete)
 
 
 PLAN_SYSTEM_PROMPT = """你是一个任务规划器。根据用户任务，将其分解为多个步骤（DAG），每个步骤分配给最合适的专业 Agent 或 Skill。
@@ -189,6 +201,8 @@ class DynamicOrchestrator:
         state.status = "running"
         state.updated_at = datetime.now().isoformat()
 
+        get_checkpoint().save(state)
+
         # Publish workflow_plan event with Vue Flow data
         nodes, edges = self._to_vue_flow(state.steps)
         await publish_workflow_event("workflow_plan", orchestration_id, {
@@ -275,6 +289,11 @@ class DynamicOrchestrator:
             "status": state.status,
         })
 
+        if state.status == "completed":
+            get_checkpoint().delete(orchestration_id)
+        else:
+            get_checkpoint().save(state)
+
         return state
 
     async def execute_step(
@@ -325,6 +344,8 @@ class DynamicOrchestrator:
 
         state.updated_at = datetime.now().isoformat()
         await self._publish_step_update(orchestration_id, step)
+
+        get_checkpoint().save(state)
         return step
 
     async def rollback(
