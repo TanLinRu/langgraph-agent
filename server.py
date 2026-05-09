@@ -31,6 +31,7 @@ from src.agent.tools import TOOLS
 from src.agent.registry import get_registry
 from src.agent.orchestrator import get_orchestrator
 from src.agent.orchestrator_v2 import DynamicOrchestrator, get_orchestration, list_orchestrations
+from src.agent.task_classifier import classify_task, get_routing_decision, should_orchestrate
 from src.agent.supervisor import get_supervisor_manager, SupervisorManager
 from src.agent.event_bus import get_event_bus, ExecutionEvent
 from src.agent.metrics_collector import get_metrics_collector
@@ -169,6 +170,46 @@ async def chat(req: ChatRequest):
             "elapsed_sec": 0,
         }
     start = time.time()
+
+    classification = classify_task(req.message)
+    routing = get_routing_decision(classification)
+
+    if routing["route_to"] == "orchestrator":
+        orchestrator = app.state.dynamic_orchestrator
+        orchestration_id = f"chat-{req.thread_id}-{int(time.time())}"
+        await orchestrator.plan(orchestration_id, req.message, req.thread_id)
+        state = await orchestrator.execute(orchestration_id)
+
+        all_results = []
+        for step in state.steps:
+            if step.status == "completed" and step.result:
+                all_results.append({
+                    "step_id": step.step_id,
+                    "description": step.description,
+                    "agent_id": step.agent_id,
+                    "result": step.result,
+                    "status": step.status,
+                })
+
+        combined_reply = "\n\n---\n\n".join([
+            f"### Step: {s['description']}\n**Agent**: {s['agent_id']}\n**Result**: {s['result']}"
+            for s in all_results
+        ]) if all_results else "任务已完成"
+
+        return {
+            "status": "success",
+            "reply": combined_reply,
+            "messages": [],
+            "tool_calls": None,
+            "metrics": {},
+            "compression_count": None,
+            "elapsed_sec": round(time.time() - start, 2),
+            "orchestration": {
+                "id": orchestration_id,
+                "steps": len(state.steps),
+                "routing": routing,
+            }
+        }
 
     result = agent.run(req.message, thread_id=req.thread_id)
     elapsed = time.time() - start
@@ -1297,6 +1338,28 @@ async def approve_orchestration_replan(orchestration_id: str, req: ApproveReques
     await orch.approve_replan(orchestration_id, req.approved)
     return {
         "orchestration_id": orchestration_id,
+        "approved": req.approved,
+    }
+
+
+class StepApproveRequest(BaseModel):
+    step_id: str
+    approved: bool = True
+
+
+@app.post("/api/orchestrate/{orchestration_id}/step/approve")
+async def approve_orchestration_step(
+    orchestration_id: str, req: StepApproveRequest
+):
+    """批准或拒绝步骤继续执行"""
+    orch: DynamicOrchestrator = app.state.dynamic_orchestrator
+    state = get_orchestration(orchestration_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Orchestration not found")
+    await orch.approve_step(orchestration_id, req.step_id, req.approved)
+    return {
+        "orchestration_id": orchestration_id,
+        "step_id": req.step_id,
         "approved": req.approved,
     }
 

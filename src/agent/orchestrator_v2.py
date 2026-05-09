@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # In-memory orchestration state store
 _orchestrations: dict[str, OrchestratorState] = {}
 _replan_approvals: dict[str, asyncio.Event] = {}
+_step_approvals: dict[str, dict[str, asyncio.Event]] = {}
 
 
 def get_orchestration(orchestration_id: str) -> Optional[OrchestratorState]:
@@ -298,6 +299,16 @@ class DynamicOrchestrator:
             result = await self._invoke_step(step, context)
 
             step.result = result
+            step.status = "waiting_approval"
+            await self._publish_step_update(orchestration_id, step)
+
+            approved = await self.request_step_approval(orchestration_id, step_id)
+            if not approved:
+                step.status = "rejected"
+                step.error = "Rejected by user"
+                await self._publish_step_update(orchestration_id, step)
+                return step
+
             step.status = "completed"
         except Exception as e:
             logger.error(
@@ -355,6 +366,48 @@ class DynamicOrchestrator:
         if event:
             event._approved = approved  # noqa: store approval decision
             event.set()
+
+    async def request_step_approval(
+        self, orchestration_id: str, step_id: str, timeout: float = 300.0
+    ) -> bool:
+        """请求步骤审批，返回是否批准"""
+        if orchestration_id not in _step_approvals:
+            _step_approvals[orchestration_id] = {}
+
+        event = asyncio.Event()
+        _step_approvals[orchestration_id][step_id] = event
+
+        try:
+            approved = await asyncio.wait_for(event.wait(), timeout=timeout)
+            return approved
+        except asyncio.TimeoutError:
+            logger.warning(f"[Orchestrator] Step {step_id} approval timeout")
+            return False
+        finally:
+            _step_approvals[orchestration_id].pop(step_id, None)
+
+    async def approve_step(
+        self, orchestration_id: str, step_id: str, approved: bool = True
+    ) -> OrchestratorState:
+        """批准或拒绝步骤继续执行。"""
+        state = _orchestrations.get(orchestration_id)
+        if not state:
+            raise ValueError(f"Orchestration not found: {orchestration_id}")
+
+        step = next((s for s in state.steps if s.step_id == step_id), None)
+        if not step:
+            raise ValueError(f"Step not found: {step_id}")
+
+        if step.status == "waiting_approval":
+            step.status = "running" if approved else "rejected"
+            await self._publish_step_update(orchestration_id, step)
+
+        event = _step_approvals.get(orchestration_id, {}).get(step_id)
+        if event:
+            event._approved = approved  # noqa: store approval decision
+            event.set()
+
+        return state
 
     def get_state(self, orchestration_id: str) -> Optional[OrchestratorState]:
         return _orchestrations.get(orchestration_id)
