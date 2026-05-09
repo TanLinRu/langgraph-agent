@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 if sys.platform == "win32":
@@ -140,9 +140,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LangGraph Agent API", lifespan=lifespan)
 
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -150,7 +151,7 @@ app.add_middleware(
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=100000)
     thread_id: str = "default"
 
 
@@ -840,38 +841,6 @@ async def run_execution(req: ExecutionRunRequest):
     except Exception as e:
         logger.error(f"[Execution] Failed: {e}")
         raise HTTPException(status=500, detail=str(e))
-
-    # 优先使用 SupervisorManager
-    supervisor_mgr = getattr(app.state, "supervisor_mgr", None)
-    if supervisor_mgr and agent and agent.llm:
-        try:
-            result = await supervisor_mgr.run(
-                req.graph_id, req.input_text, thread_id="default"
-            )
-            return {
-                "execution_id": result["execution_id"],
-                "status": result["status"],
-                "output": result.get("output"),
-            }
-        except Exception as e:
-            logger.warning(f"[Execution] Supervisor failed, falling back to legacy: {e}")
-
-    # 回退到 legacy orchestrator
-    orchestrator = get_orchestrator()
-    execution = orchestrator.create_execution(req.graph_id, req.input_text)
-    if not execution:
-        raise HTTPException(status_code=400, detail="Failed to create execution")
-
-    if agent and agent.llm:
-        await orchestrator.run_execution(execution.execution_id, agent.llm, TOOLS)
-
-    state = orchestrator.get_execution(execution.execution_id)["state"]
-
-    return {
-        "execution_id": execution.execution_id,
-        "status": state.status,
-        "output": state.output,
-    }
 
 
 @app.post("/api/execution/run/stream")
