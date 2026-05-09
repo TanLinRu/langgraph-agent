@@ -51,6 +51,9 @@ def read_file(path: str, offset: int = 0, limit: int = 100) -> str:
     Use when: 需要查看文件内容时
     Don't use when: 文件不存在或权限不足
     """
+    if _is_dangerous_path(path):
+        return "错误: 禁止访问敏感路径"
+
     try:
         with open(path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -99,6 +102,9 @@ def list_directory(path: str = ".", pattern: str = "*") -> str:
     Use when: 需要查看目录结构时
     Don't use when: 目录不存在
     """
+    if _is_dangerous_path(path):
+        return "错误: 禁止访问敏感路径"
+
     try:
         from glob import glob
         files = glob(os.path.join(path, pattern))
@@ -219,7 +225,14 @@ def search_files(path: str, pattern: str, file_type: str = "*") -> str:
 def _is_dangerous_path(path: str) -> bool:
     """检查危险路径"""
     dangerous = ['/etc', '/root', '/sys', '/proc', 'C:\\Windows']
-    return any(path.startswith(d) for d in dangerous)
+    normalized = os.path.normpath(path)
+    if any(normalized.startswith(d) for d in dangerous):
+        return True
+    if '..' in path:
+        return True
+    if os.path.isabs(path) and not path.startswith(os.getcwd()):
+        return True
+    return False
 
 
 def _match_pattern(filename: str, pattern: str) -> bool:

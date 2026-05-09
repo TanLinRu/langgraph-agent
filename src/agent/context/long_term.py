@@ -185,16 +185,26 @@ class LongTermManager:
                 }, ensure_ascii=False, default=str) + "\n")
 
     def _get_last_turn_count(self, session_file: Path) -> int:
-        """获取当前已保存的消息总数"""
+        """获取当前已保存的消息总数 - 优化：只读最后一行"""
         if not session_file.exists():
             return 0
 
-        total = 0
-        with open(session_file, encoding="utf-8") as f:
-            for line in f:
-                data = json.loads(line)
-                total += len(data.get("messages", []))
-        return total
+        try:
+            with open(session_file, "rb") as f:
+                f.seek(0, 2)
+                file_size = f.tell()
+                if file_size == 0:
+                    return 0
+                f.seek(max(0, file_size - 4096))
+                tail = f.read().decode('utf-8')
+                lines = tail.split('\n')
+                for line in reversed(lines):
+                    if line.strip():
+                        data = json.loads(line)
+                        return data.get("turn_offset", 0) + len(data.get("messages", []))
+        except (json.JSONDecodeError, OSError):
+            pass
+        return 0
 
     def load_recent_sessions(self, limit: int = 5) -> list[dict]:
         """加载最近的 N 个会话"""

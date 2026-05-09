@@ -284,13 +284,7 @@ Status: {sop_state.get('status')}
         import time
         start_time = time.time()
 
-        logger.info(f"[LLM Request] Model: {self.config.model}")
-        logger.info(f"[LLM Request] Base URL: {self.config.base_url}")
-        logger.info(f"[LLM Request] Messages count: {len(messages)}")
-        for i, msg in enumerate(messages):
-            role = _msg_get(msg, "role", "unknown")
-            content = str(_msg_get(msg, "content", ""))[:200]
-            logger.info(f"[LLM Request] Message {i}: role={role}, content={content}")
+        logger.debug(f"[LLM] Model={self.config.model}, Messages={len(messages)}")
 
         callbacks = [self.langsmith_handler] if self.langsmith_handler else []
         invoke_config = {"callbacks": callbacks} if callbacks else {}
@@ -303,25 +297,14 @@ Status: {sop_state.get('status')}
             self._metrics["total_requests"] += 1
             self._metrics["total_latency"] += elapsed
 
-            logger.info(f"[LLM Response] Elapsed: {elapsed:.2f}s")
-
-            if hasattr(response, 'content'):
-                content = response.content[:200] if response.content else ""
-                logger.info(f"[LLM Response] Content length: {len(response.content) if response.content else 0}")
-                logger.info(f"[LLM Response] Content preview: {content[:100]}...")
-
             prompt_tokens = 0
             completion_tokens = 0
             if hasattr(response, 'response_metadata'):
                 meta = response.response_metadata
                 prompt_tokens = meta.get('prompt_tokens', 0)
                 completion_tokens = meta.get('completion_tokens', 0)
-                tokens = prompt_tokens + completion_tokens
 
-                if prompt_tokens:
-                    logger.info(f"[LLM Response] Prompt tokens: {prompt_tokens}")
-                if completion_tokens:
-                    logger.info(f"[LLM Response] Completion tokens: {completion_tokens}")
+            logger.info(f"[LLM] elapsed={elapsed:.2f}s, prompt_tok={prompt_tokens}, comp_tok={completion_tokens}")
 
             tokens = prompt_tokens + completion_tokens
             if tokens > 0:
