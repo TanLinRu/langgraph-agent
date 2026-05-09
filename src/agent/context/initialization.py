@@ -53,7 +53,10 @@ class ContextInitializer:
                 })
 
         if self.config.resume_on_startup:
-            if thread_id:
+            is_temp_session = thread_id and thread_id.startswith("session-")
+            if is_temp_session:
+                session_messages = []
+            elif thread_id:
                 session_messages = self.long_term.load_session_messages(thread_id)
             else:
                 latest_thread = self.long_term.get_latest_thread()
