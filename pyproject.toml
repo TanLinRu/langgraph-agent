@@ -30,6 +30,14 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.0",
 ]
+automation = [
+    "pyautogui>=0.9.54",
+    "Pillow>=10.0.0",
+    "pywin32>=306",
+]
+browser = [
+    "browser-use>=0.12.0",
+]
 
 [tool.ruff]
 target-version = "py311"

@@ -54,12 +54,14 @@ SIMPLE_PATTERNS = [
 ]
 
 
+from .trace_context import get_trace_id, generate_trace_id
+
+
 def classify_task(task: str, llm=None) -> TaskClassification:
     """
     分类任务复杂度
 
-    Returns:
-        TaskClassification with complexity, confidence, reason
+    When score is borderline (2-4), uses LLM for second opinion if provided.
     """
     task = task.strip()
     task_lower = task.lower()
@@ -89,6 +91,24 @@ def classify_task(task: str, llm=None) -> TaskClassification:
     if "?" in task or "？" in task:
         complexity_score -= 1
 
+    # Borderline case: use LLM for second opinion
+    if llm is not None and 2 <= complexity_score <= 4:
+        try:
+            from .prompts.system_prompt import SYSTEM_PROMPT
+
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"分析以下任务的复杂度，回复\"简单\"或\"复杂\"：\n{task}"},
+            ]
+            response = llm.invoke(messages)
+            content = response.content.strip().lower()
+            if "复杂" in content or "complex" in content:
+                complexity_score = max(complexity_score, 5)
+            else:
+                complexity_score = min(complexity_score, 1)
+        except Exception:
+            pass  # Fall back to keyword score
+
     if complexity_score >= 3:
         estimated = min(6, 2 + complexity_score // 2)
         return TaskClassification(
@@ -115,10 +135,14 @@ def should_orchestrate(classification: TaskClassification) -> bool:
 
 def get_routing_decision(classification: TaskClassification) -> dict:
     """获取路由决策"""
+    tid = get_trace_id()
+    if not tid:
+        tid = generate_trace_id()
     return {
         "route_to": "orchestrator" if should_orchestrate(classification) else "direct",
         "complexity": classification.complexity,
         "estimated_steps": classification.estimated_steps,
         "confidence": classification.confidence,
         "reason": classification.reason,
+        "trace_id": tid,
     }

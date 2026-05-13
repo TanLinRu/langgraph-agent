@@ -47,6 +47,8 @@ from src.agent.sop_state import (
 )
 from src.agent.cli import get_available_clis, get_cli, init as init_cli
 from src.agent.cli.dispatcher import dispatch_run, dispatch_run_stream, start_serve, stop_serve, get_active_serves
+from src.agent.trace_context import generate_trace_id, set_trace_id
+from src.agent.audit_log import write_audit, AuditAction
 
 agent = None
 
@@ -160,9 +162,17 @@ class ChatRequest(BaseModel):
     thread_id: str = "default"
 
 
+class AgentRunRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=100000)
+    thread_id: str = "default"
+    force_mode: str | None = None  # "direct" | "orchestrator" | None
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest):
     global agent
+    tid = generate_trace_id()
+    set_trace_id(tid)
     if not agent:
         return {
             "status": "error",
@@ -172,10 +182,11 @@ async def chat(req: ChatRequest):
             "metrics": {},
             "compression_count": None,
             "elapsed_sec": 0,
+            "trace_id": tid,
         }
     start = time.time()
 
-    classification = classify_task(req.message)
+    classification = classify_task(req.message, llm=agent.llm)
     routing = get_routing_decision(classification)
 
     if routing["route_to"] == "orchestrator":
@@ -273,6 +284,152 @@ async def chat(req: ChatRequest):
         "tool_calls": tool_calls_list if tool_calls_list else None,
         "metrics": metrics,
         "compression_count": compression_count,
+        "elapsed_sec": round(elapsed, 2),
+        "trace_id": tid,
+        "routing": routing,
+    }
+
+
+@app.post("/api/agent/run")
+async def agent_run(req: AgentRunRequest):
+    """Unified agent entry point - automatically routes to direct or orchestrator based on task complexity."""
+    global agent
+    tid = generate_trace_id()
+    set_trace_id(tid)
+
+    if not agent:
+        return {
+            "status": "error",
+            "reply": "Agent not initialized",
+            "trace_id": tid,
+            "route": None,
+            "classification": None,
+        }
+
+    start = time.time()
+    classification = classify_task(req.message, llm=agent.llm)
+    routing = get_routing_decision(classification)
+
+    if req.force_mode == "orchestrator" or (req.force_mode is None and routing["route_to"] == "orchestrator"):
+        orchestrator = app.state.dynamic_orchestrator
+        orchestration_id = f"run-{req.thread_id}-{int(time.time())}"
+        write_audit(AuditAction.ORCHESTRATION_START, f"user:{req.thread_id}", orchestration_id, {"message": req.message[:200]})
+        await orchestrator.plan(orchestration_id, req.message, req.thread_id)
+        state = await orchestrator.execute(orchestration_id)
+
+        all_results = []
+        for step in state.steps:
+            if step.status == "completed" and step.result:
+                all_results.append({
+                    "step_id": step.step_id,
+                    "description": step.description,
+                    "agent_id": step.agent_id,
+                    "result": step.result,
+                    "status": step.status,
+                })
+
+        combined_reply = "\n\n---\n\n".join([
+            f"### Step: {s['description']}\n**Agent**: {s['agent_id']}\n**Result**: {s['result']}"
+            for s in all_results
+        ]) if all_results else "任务已完成"
+
+        write_audit(AuditAction.ORCHESTRATION_COMPLETE, f"user:{req.thread_id}", orchestration_id, {"step_count": len(state.steps)})
+
+        return {
+            "status": "success",
+            "reply": combined_reply,
+            "trace_id": tid,
+            "route": "orchestrator",
+            "classification": {
+                "complexity": classification.complexity,
+                "confidence": classification.confidence,
+                "reason": classification.reason,
+                "estimated_steps": classification.estimated_steps,
+                "keywords_found": classification.keywords_found,
+            },
+            "orchestration_id": orchestration_id,
+            "steps": [
+                {
+                    "step_id": s.step_id,
+                    "agent_id": s.agent_id,
+                    "description": s.description,
+                    "status": s.status,
+                    "result": s.result,
+                }
+                for s in state.steps
+            ],
+            "elapsed_sec": round(time.time() - start, 2),
+        }
+
+    # Direct agent execution
+    result = agent.run(req.message, thread_id=req.thread_id)
+    elapsed = time.time() - start
+
+    if result["status"] == "error":
+        return {
+            "status": "error",
+            "reply": result.get("error", "Unknown error"),
+            "trace_id": tid,
+            "route": "direct",
+            "classification": {
+                "complexity": classification.complexity,
+                "confidence": classification.confidence,
+                "reason": classification.reason,
+                "estimated_steps": classification.estimated_steps,
+                "keywords_found": classification.keywords_found,
+            },
+            "elapsed_sec": round(elapsed, 2),
+        }
+
+    graph_result = result["result"]
+    messages_raw = graph_result.get("messages", [])
+
+    from src.agent.agent import _deduplicate_messages
+    messages_raw = _deduplicate_messages(messages_raw)
+    messages = [_extract_msg(m) for m in messages_raw]
+
+    tool_calls_list = []
+    bus = get_event_bus()
+    for m in messages:
+        if m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                tool_calls_list.append(tc)
+                await bus.publish(ExecutionEvent(
+                    event_type="skill_trigger",
+                    data={"tool_name": tc.get("name", "unknown"), "thread_id": req.thread_id, "trace_id": tid},
+                ))
+        if m.get("role") == "tool":
+            tool_calls_list.append({
+                "name": "tool_result",
+                "result": m.get("content", ""),
+            })
+
+    reply = ""
+    for m in reversed(messages_raw):
+        role = _get_role(m)
+        if role == "assistant":
+            reply = _get_content(m)
+            break
+
+    metrics = agent.get_metrics()
+    compression_count = graph_result.get("compression_count")
+
+    return {
+        "status": "success",
+        "reply": reply,
+        "messages": messages,
+        "tool_calls": tool_calls_list if tool_calls_list else None,
+        "metrics": metrics,
+        "compression_count": compression_count,
+        "trace_id": tid,
+        "route": "direct",
+        "classification": {
+            "complexity": classification.complexity,
+            "confidence": classification.confidence,
+            "reason": classification.reason,
+            "estimated_steps": classification.estimated_steps,
+            "keywords_found": classification.keywords_found,
+        },
         "elapsed_sec": round(elapsed, 2),
     }
 
@@ -508,6 +665,7 @@ async def create_workflow(req: WorkflowCreateRequest):
     }
     workflows.append(workflow)
     _save_workflows(workflows)
+    write_audit(AuditAction.WORKFLOW_CREATE, "user", workflow["id"], {"name": req.name, "node_count": len(req.nodes)})
     return {"status": "success", "workflow": workflow}
 
 
@@ -531,6 +689,7 @@ async def delete_workflow(workflow_id: str):
     workflows = _load_workflows()
     workflows = [w for w in workflows if w["id"] != workflow_id]
     _save_workflows(workflows)
+    write_audit(AuditAction.WORKFLOW_DELETE, "user", workflow_id, {})
     return {"status": "success"}
 
 
@@ -755,6 +914,7 @@ async def create_agent(req: AgentCreateRequest):
     """创建新 Agent"""
     registry = get_registry()
     agent = registry.create_agent(req.model_dump())
+    write_audit(AuditAction.AGENT_REGISTER, "user", agent.get("id", ""), {"name": req.name})
     return {"status": "success", "agent": agent}
 
 
@@ -775,6 +935,7 @@ async def delete_agent(agent_id: str):
     success = registry.delete_agent(agent_id)
     if not success:
         raise HTTPException(status_code=400, detail=f"Agent not found or cannot delete: {agent_id}")
+    write_audit(AuditAction.AGENT_DELETE, "user", agent_id, {})
     return {"status": "success"}
 
 

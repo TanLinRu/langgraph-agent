@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import AsyncGenerator, Optional
 
+from .trace_context import get_trace_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +50,12 @@ class EventBus:
 
     async def publish(self, event: ExecutionEvent):
         """发布事件到所有订阅者（非阻塞）"""
+        # Inject trace_id if not present
+        if "trace_id" not in event.data:
+            tid = get_trace_id()
+            if tid:
+                event.data["trace_id"] = tid
+
         self._recent_events.append(event)
         if len(self._recent_events) > self._max_recent:
             self._recent_events = self._recent_events[-self._max_recent:]

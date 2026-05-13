@@ -13,6 +13,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from .event_bus import get_event_bus, ExecutionEvent
+from .trace_context import get_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +28,12 @@ class EventBusCallbackHandler(BaseCallbackHandler):
 
     def _publish(self, event_type: str, data: dict):
         """同步发布事件（在事件循环中调度异步 publish）。"""
+        tid = get_trace_id() or self.execution_id
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._bus.publish(ExecutionEvent(
                 event_type=event_type,
-                data={**data, "execution_id": self.execution_id},
+                data={**data, "trace_id": tid},
             )))
         except RuntimeError:
             # 没有运行的事件循环，用新循环
@@ -39,7 +41,7 @@ class EventBusCallbackHandler(BaseCallbackHandler):
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(self._bus.publish(ExecutionEvent(
                     event_type=event_type,
-                    data={**data, "execution_id": self.execution_id},
+                    data={**data, "trace_id": tid},
                 )))
                 loop.close()
             except Exception as e:
