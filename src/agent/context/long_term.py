@@ -3,10 +3,26 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import json
 import sqlite3
+import logging
 from typing import Optional
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+
+logger = logging.getLogger(__name__)
+
+
+def get_namespace(
+    tenant_id: str = "default",
+    org_id: str = "default",
+    user_id: str = "default",
+    memory_type: str = "default",
+) -> tuple[str, str, str, str]:
+    """Namespace 设计：租户 > 组织 > 用户 > 记忆类型
+
+    设计参考: docs/context_design.md 8.1 节
+    """
+    return (tenant_id, org_id, user_id, memory_type)
 
 
 @dataclass
@@ -79,6 +95,9 @@ class LongTermManager:
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 thread_id TEXT NOT NULL UNIQUE,
+                tenant_id TEXT DEFAULT 'default',
+                org_id TEXT DEFAULT 'default',
+                user_id TEXT DEFAULT 'default',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 message_count INTEGER DEFAULT 0,
@@ -93,6 +112,26 @@ class LongTermManager:
 
         self._db_conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_updated_at ON sessions(updated_at)
+        """)
+
+        # Memory entries table for conflict tracking
+        self._db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                namespace TEXT NOT NULL,
+                memory_key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                current_value TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                value_history TEXT DEFAULT '[]',
+                conflict_type TEXT,
+                UNIQUE(namespace, memory_key)
+            )
+        """)
+
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_namespace ON memories(namespace)
         """)
 
         self._db_conn.commit()
@@ -123,22 +162,92 @@ class LongTermManager:
             return ""
         return memory_file.read_text(encoding="utf-8")
 
-    def write_memory(self, content: str, category: str = "general") -> None:
-        """写入语义记忆（追加）"""
-        memory_file = self.config.memory_dir / "memory" / "MEMORY.md"
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    def write_memory(
+        self,
+        content: str,
+        category: str = "general",
+        namespace: tuple = ("default", "default", "default", "default"),
+        memory_key: str | None = None,
+    ) -> str:
+        """写入语义记忆（支持冲突检测）
 
-        entry = f"\n### {timestamp} [{category}]\n{content}\n"
+        Returns:
+            操作类型: "add" | "update" | "noop"
+        """
+        from .conflict_resolver import resolve_memory_conflict, MemoryEntry, MemoryOp
 
-        existing = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
-        memory_file.write_text(existing + entry, encoding="utf-8")
+        ns_str = "|".join(namespace)
+        key = memory_key or f"{category}_{datetime.now().timestamp()}"
 
-        if self._vector_store:
-            self._vector_store.add(
-                documents=[content],
-                ids=[f"memory_{datetime.now().timestamp()}"],
-                metadatas=[{"category": category, "timestamp": timestamp}]
+        # 查找已存在的记忆
+        cursor = self._db_conn.execute(
+            "SELECT * FROM memories WHERE namespace = ? AND memory_key = ?",
+            (ns_str, key),
+        )
+        row = cursor.fetchone()
+
+        if row:
+            # 冲突检测与解决
+            old_mem = MemoryEntry(
+                id=str(row["id"]),
+                namespace=namespace,
+                key=key,
+                value=row["value"],
+                current_value=row["current_value"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                value_history=json.loads(row["value_history"] or "[]"),
+                conflict_type=row["conflict_type"],
             )
+            op, updated = resolve_memory_conflict(old_mem, content)
+
+            if op == MemoryOp.NOOP:
+                logger.debug(f"[Memory] No-op for {key}")
+                return "noop"
+
+            self._db_conn.execute("""
+                UPDATE memories
+                SET value = ?, current_value = ?, updated_at = CURRENT_TIMESTAMP,
+                    value_history = ?, conflict_type = ?
+                WHERE namespace = ? AND memory_key = ?
+            """, (
+                updated.value,
+                updated.current_value or updated.value,
+                json.dumps(updated.value_history),
+                updated.conflict_type,
+                ns_str, key,
+            ))
+            self._db_conn.commit()
+            logger.info(f"[Memory] Conflict resolved ({updated.conflict_type}): {key}")
+            return "update"
+        else:
+            # 新增记忆
+            self._db_conn.execute("""
+                INSERT INTO memories (namespace, memory_key, value, created_at, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, (ns_str, key, content))
+            self._db_conn.commit()
+            logger.info(f"[Memory] Added new: {key}")
+            return "add"
+
+    def read_memories(
+        self,
+        namespace: tuple = ("default", "default", "default", "default"),
+        memory_type: str = "default",
+    ) -> list[str]:
+        """读取指定 namespace 的所有记忆值"""
+        ns_str = "|".join(namespace)
+        cursor = self._db_conn.execute(
+            "SELECT value, current_value, conflict_type FROM memories WHERE namespace LIKE ? || '%'",
+            (ns_str[:ns_str.index("|")],),
+        )
+        results = []
+        for row in cursor.fetchall():
+            if row["conflict_type"] == "contradiction" and row["current_value"]:
+                results.append(f"[冲突历史] {row['value']} → [当前] {row['current_value']}")
+            else:
+                results.append(row["value"])
+        return results
 
     def search_similar(self, query: str, top_k: int = 3) -> list[str]:
         """语义搜索"""

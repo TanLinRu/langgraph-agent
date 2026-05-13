@@ -19,6 +19,7 @@ from .context import (
     InitConfig,
     ArchiveManager,
     ArchiveConfig,
+    RetrievalTrigger,
 )
 from .prompts import SYSTEM_PROMPT
 from .skills import SKILLS_INDEX, get_skill_content, should_load_skill
@@ -28,6 +29,16 @@ from .graceful_degradation import get_degradation, get_health_checker
 from .human_in_loop import get_hitl
 
 logger = logging.getLogger(__name__)
+
+
+def make_thread_id(
+    tenant_id: str = "default",
+    org_id: str = "default",
+    user_id: str = "default",
+    session_id: str = "default",
+) -> str:
+    """生成带 namespace 的 thread_id (设计参考: context_design.md 8.2)"""
+    return f"{tenant_id}:{org_id}:{user_id}:{session_id}"
 
 
 def _msg_get(msg, key, default=None):
@@ -143,6 +154,7 @@ class Agent:
             load_memory=config.initialization.load_memory,
         )
         self.initializer = ContextInitializer(self.long_term, init_config)
+        self.retrieval_trigger = RetrievalTrigger()
 
         archive_config = ArchiveConfig(
             enabled=True,
@@ -326,7 +338,44 @@ Status: {sop_state.get('status')}
                     "elapsed_sec": round(elapsed, 2),
                 })
 
-            return {"messages": [response]}
+            # === Token usage tracking ===
+            current_usage = state.get("token_usage", {})
+            budget = current_usage.get("budget", 128000)
+            msg_tokens = current_usage.get("messages", 0) + tokens
+            token_update = {
+                "token_usage": {
+                    "messages": msg_tokens,
+                    "hot_zone": current_usage.get("hot_zone", 0),
+                    "budget": budget,
+                    "percentage": round(msg_tokens / budget * 100, 1),
+                }
+            }
+
+            # === Retrieval trigger check ===
+            retrieved_context = ""
+            should_trig, reason = self.retrieval_trigger.should_retrieve(
+                {"messages": messages, "token_usage": token_update["token_usage"]},
+                session_summary=""
+            )
+            if should_trig:
+                memories = self.long_term.search_similar(
+                    messages[-1].get("content", "") if messages else "",
+                    top_k=3
+                )
+                if memories:
+                    retrieved_context = "\n\n【相关记忆】\n" + "\n".join(f"- {m}" for m in memories)
+                    logger.info(f"[Retrieval] Triggered by {reason}, injected {len(memories)} memories")
+
+            result_msg = [response]
+            if retrieved_context:
+                result_msg = [{
+                    "role": "system",
+                    "content": f"[相关记忆检索: {reason}]{retrieved_context}",
+                    "name": "retrieved_memory",
+                }, response]
+
+            result = {"messages": result_msg, **token_update}
+            return result
 
         except Exception as e:
             elapsed = time.time() - start_time
@@ -443,7 +492,13 @@ Status: {sop_state.get('status')}
             initial_state["sop_name"] = sop_name
             logger.info(f"[Run] SOP resume enabled: {sop_name}")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        namespaced_id = make_thread_id(
+            tenant_id=os.getenv("AGENT_TENANT_ID", "default"),
+            org_id=os.getenv("AGENT_ORG_ID", "default"),
+            user_id=os.getenv("AGENT_USER_ID", "default"),
+            session_id=thread_id,
+        )
+        config = {"configurable": {"thread_id": namespaced_id}}
 
         checkpoint = self.checkpointer.get(config)
         if checkpoint and checkpoint.get("channel_values", {}).get("messages"):
@@ -470,7 +525,13 @@ Status: {sop_state.get('status')}
         if sop_name:
             initial_state["sop_name"] = sop_name
 
-        config = {"configurable": {"thread_id": thread_id}}
+        namespaced_id = make_thread_id(
+            tenant_id=os.getenv("AGENT_TENANT_ID", "default"),
+            org_id=os.getenv("AGENT_ORG_ID", "default"),
+            user_id=os.getenv("AGENT_USER_ID", "default"),
+            session_id=thread_id,
+        )
+        config = {"configurable": {"thread_id": namespaced_id}}
 
         checkpoint = self.checkpointer.get(config)
         if checkpoint and checkpoint.get("channel_values", {}).get("messages"):
