@@ -96,7 +96,6 @@ class ContextCompressor:
         if not user_assistant:
             return messages
 
-        # 先将 tool results 存入 Hot Zone store
         for tool_msg in tools:
             tool_call_id = _msg_id(tool_msg)
             tool_name = _msg_get(tool_msg, "name", "unknown")
@@ -105,11 +104,10 @@ class ContextCompressor:
             if tool_call_id:
                 self._tool_store.store(tool_call_id, tool_name, content, status)
 
-        # 生成结构化压缩
         compressed_turns = self._build_compressed_turns(user_assistant, tools)
+        self._enrich_turns_with_llm(compressed_turns)
         summary = self._llm_summarize_turns(compressed_turns)
 
-        # 保留最近对话 + Hot Zone tools
         recent_conversations = user_assistant[-self.config.keep_recent:]
         hot_zone_summaries = self._tool_store.get_hot_zone()
 
@@ -122,7 +120,6 @@ class ContextCompressor:
             "compressed_turns": [self._turn_to_dict(ct) for ct in compressed_turns],
         })
         compressed.extend(recent_conversations)
-        # Hot Zone 的 tool result 摘要作为结构化记录
         for hs in hot_zone_summaries:
             compressed.append({
                 "role": "tool",
@@ -141,6 +138,56 @@ class ContextCompressor:
         )
 
         return compressed
+
+    def _enrich_turns_with_llm(self, turns: list[CompressedTurn]) -> None:
+        """LLM 提取 key_facts 和 unresolved (OpenCode 模式)"""
+        if not self.llm or not turns:
+            return
+
+        try:
+            turn_texts = []
+            for t in turns:
+                tool_names = [a["name"] for a in t.tool_actions] if t.tool_actions else ["无"]
+                turn_texts.append(
+                    f"Turn {t.turn_index}: 意图={t.user_intent[:100]} | "
+                    f"工具={', '.join(tool_names)}"
+                )
+
+            prompt = f"""分析以下对话轮次，提取关键信息。
+
+对于每个轮次，请用 JSON 格式返回：
+{{
+  "turns": [
+    {{
+      "turn_index": 数字,
+      "key_facts": ["关键事实1", "关键事实2"],  // 提取的技术约束、需求、决策
+      "unresolved": ["待解决问题1", "待解决问题2"]  // 检测到的未完成事项
+    }}
+  ]
+}}
+
+对话：
+{chr(10).join(turn_texts)}
+
+JSON："""
+
+            response = self.llm.invoke(prompt)
+            content = response.content if hasattr(response, "content") else str(response)
+            import json
+            import re
+
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                data = json.loads(json_match.group())
+                turn_map = {t["turn_index"]: t for t in data.get("turns", [])}
+                for turn in turns:
+                    if turn.turn_index in turn_map:
+                        info = turn_map[turn.turn_index]
+                        turn.key_facts = info.get("key_facts", [])
+                        turn.unresolved = info.get("unresolved", [])
+            logger.info(f"[LLM Enrich] Extracted facts/unresolved for {len(turns)} turns")
+        except Exception as e:
+            logger.warning(f"[LLM Enrich] Failed: {e}, using empty fields")
 
     def _build_compressed_turns(
         self, user_assistant: list, tools: list
