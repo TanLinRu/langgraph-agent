@@ -1,0 +1,6 @@
+{"event": "verification_start", "timestamp": "20260517-165213", "mode": "mock"}
+{"event": "agent_run", "turn": 1, "input": "Hi", "thread_id": "test-multi-51e777ef"}
+{"event": "agent_run", "turn": 2, "input": "What is Python?", "thread_id": "test-multi-51e777ef"}
+{"event": "agent_run", "turn": 3, "input": "Give me an example", "thread_id": "test-multi-51e777ef"}
+{"event": "multi_turn_test", "mode": "mock", "thread_id": "test-multi-51e777ef", "turns": [{"turn": 1, "elapsed": 0.19562077522277832, "messages": 2, "tokens": 85}, {"turn": 2, "elapsed": 0.002363920211791992, "messages": 2, "tokens": 139}, {"turn": 3, "elapsed": 0.0023086071014404297, "messages": 2, "tokens": 190}], "total_tokens": 414}
+{"event": "verification_end", "passed": 1, "failed": 2, "results": {"token_compression": false, "multi_turn": true, "long_term": false}}

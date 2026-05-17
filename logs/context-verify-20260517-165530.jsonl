@@ -1,0 +1,8 @@
+{"event": "verification_start", "timestamp": "20260517-165530", "mode": "mock"}
+{"event": "agent_run", "turn": 1, "input": "Hi", "thread_id": "test-multi-827386c1"}
+{"event": "agent_run", "turn": 2, "input": "What is Python?", "thread_id": "test-multi-827386c1"}
+{"event": "agent_run", "turn": 3, "input": "Give me an example", "thread_id": "test-multi-827386c1"}
+{"event": "multi_turn_test", "mode": "mock", "thread_id": "test-multi-827386c1", "turns": [{"turn": 1, "elapsed": 0.20644187927246094, "messages": 2, "tokens": 85}, {"turn": 2, "elapsed": 0.002903461456298828, "messages": 2, "tokens": 139}, {"turn": 3, "elapsed": 0.0021317005157470703, "messages": 2, "tokens": 190}], "total_tokens": 414}
+{"event": "long_term_save", "thread_id": "test-long-term-1779008133", "messages": [{"role": "user", "content": "Test message 1 - implement quicksort"}, {"role": "assistant", "content": "Here's quicksort: def quicksort(arr): ..."}, {"role": "user", "content": "Test message 2 - add unit tests"}, {"role": "assistant", "content": "Added unit tests for edge cases."}]}
+{"event": "long_term_load", "thread_id": "test-long-term-1779008133", "loaded_messages": [{"role": "user", "content": "Test message 1 - implement quicksort"}, {"role": "assistant", "content": "Here's quicksort: def quicksort(arr): ..."}, {"role": "user", "content": "Test message 2 - add unit tests"}, {"role": "assistant", "content": "Added unit tests for edge cases."}]}
+{"event": "verification_end", "passed": 2, "failed": 1, "results": {"token_compression": false, "multi_turn": true, "long_term": true}}
