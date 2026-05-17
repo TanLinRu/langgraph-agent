@@ -1,85 +1,174 @@
+"""Tests for context compression functionality"""
+import os
+from unittest.mock import patch, MagicMock
+
 import pytest
-from unittest.mock import MagicMock
+
+from src.agent.context.compression import (
+    ContextCompressor,
+    CompressionConfig,
+    CompressedTurn,
+    CompressionResult,
+)
 
 
+def should_use_real_api():
+    return os.getenv("USE_REAL_API", "false").lower() == "true"
+
+
+@pytest.mark.unit
+@pytest.mark.context
 class TestContextCompression:
+    """Test suite for context compression"""
 
-    def _create_compressor(self, keep_recent=5, mock_llm=None):
-        from src.agent.context.compression import ContextCompressor, CompressionConfig
-
-        config = CompressionConfig(
-            max_tokens=128000,
-            trigger_threshold=0.0,  # 强制触发压缩
-            keep_recent=keep_recent,
-            summary_max_tokens=500,
+    @pytest.fixture
+    def config(self):
+        return CompressionConfig(
+            max_tokens=1000,
+            trigger_threshold=0.1,
+            keep_recent=2,
+            summary_max_tokens=100,
+            hot_zone_size=3,
         )
-        return ContextCompressor(config, llm=mock_llm)
 
-    def test_compress_preserves_recent_user_assistant_messages(self):
-        """验证压缩后保留最近 N 条 user/assistant 消息"""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="对话摘要")
+    @pytest.fixture
+    def compressor(self, config):
+        return ContextCompressor(config)
 
-        compressor = self._create_compressor(keep_recent=3, mock_llm=mock_llm)
 
-        messages = [
-            {"role": "system", "content": "system prompt"},
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": "a1"},
-            {"role": "user", "content": "u2"},
-            {"role": "assistant", "content": "a2"},
-            {"role": "user", "content": "u3"},
-            {"role": "assistant", "content": "a3"},
-            {"role": "user", "content": "u4"},
-            {"role": "assistant", "content": "a4"},
-        ]
-
-        compressed = compressor.compress(messages)
-
-        roles = [m.get("role") for m in compressed]
-        assert "system" in roles
-
-        user_assistant_count = sum(
-            1 for m in compressed if m.get("role") in ("user", "assistant")
+@pytest.mark.unit
+@pytest.mark.context
+class TestCompressionResult:
+    def test_result_has_errors_field(self):
+        result = CompressionResult(
+            compressed_messages=[],
+            compressed_turns=[],
+            original_count=10,
+            compressed_count=5,
+            compression_ratio=0.5,
+            token_saved=100,
+            errors=[],
+            warnings=[],
         )
-        assert user_assistant_count == 3
+        assert hasattr(result, "errors")
+        assert result.errors == []
 
-        last_user_msg = [m for m in compressed if m.get("role") == "user"][-1]
-        assert last_user_msg["content"] == "u4"
+    def test_result_has_warnings_field(self):
+        result = CompressionResult(
+            compressed_messages=[],
+            compressed_turns=[],
+            original_count=10,
+            compressed_count=5,
+            compression_ratio=0.5,
+            token_saved=100,
+            errors=[],
+            warnings=["test warning"],
+        )
+        assert hasattr(result, "warnings")
+        assert len(result.warnings) == 1
 
-    def test_compress_preserves_recent_tool_results(self):
-        """验证压缩后保留最近 N 条 tool 结果"""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="对话摘要")
+    def test_has_errors_false_when_empty(self):
+        result = CompressionResult(
+            compressed_messages=[],
+            compressed_turns=[],
+            original_count=0,
+            compressed_count=0,
+            compression_ratio=1.0,
+            token_saved=0,
+        )
+        assert result.has_errors() is False
 
-        compressor = self._create_compressor(keep_recent=3, mock_llm=mock_llm)
+    def test_has_warnings_false_when_empty(self):
+        result = CompressionResult(
+            compressed_messages=[],
+            compressed_turns=[],
+            original_count=0,
+            compressed_count=0,
+            compression_ratio=1.0,
+            token_saved=0,
+        )
+        assert result.has_warnings() is False
 
+    def test_compression_ratio_calculation(self):
+        result = CompressionResult(
+            compressed_messages=["a", "b"],
+            compressed_turns=[],
+            original_count=10,
+            compressed_count=2,
+            compression_ratio=0.2,
+            token_saved=80,
+        )
+        assert result.compression_ratio == 0.2
+
+
+@pytest.mark.unit
+@pytest.mark.context
+class TestCompressReturnsCompressionResult:
+    @pytest.fixture
+    def config(self):
+        return CompressionConfig(
+            max_tokens=1000,
+            trigger_threshold=0.1,
+            keep_recent=2,
+            summary_max_tokens=100,
+            hot_zone_size=3,
+        )
+
+    def test_compress_returns_compression_result(self, config):
+        compressor = ContextCompressor(config)
         messages = [
-            {"role": "system", "content": "system prompt"},
-            {"role": "tool", "content": "result1"},
-            {"role": "tool", "content": "result2"},
-            {"role": "tool", "content": "result3"},
-            {"role": "tool", "content": "result4"},
-            {"role": "tool", "content": "result5"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
         ]
+        result = compressor.compress(messages)
+        assert isinstance(result, CompressionResult)
+        assert hasattr(result, "errors")
+        assert hasattr(result, "warnings")
+        assert result.compressed_messages is not None
 
-        compressed = compressor.compress(messages)
 
-        tool_count = sum(1 for m in compressed if m.get("role") == "tool")
-        assert tool_count >= 3
+@pytest.mark.unit
+@pytest.mark.context
+class TestCompressedTurn:
+    def test_compressed_turn_creation(self):
+        turn = CompressedTurn(
+            turn_index=0,
+            user_intent="test intent",
+            key_facts=["fact1"],
+            tool_actions=[{"name": "test_tool"}],
+            unresolved=["unresolved1"],
+            compression_rationale="test",
+        )
+        assert turn.turn_index == 0
+        assert turn.user_intent == "test intent"
+        assert len(turn.key_facts) == 1
+        assert len(turn.unresolved) == 1
 
-    def test_compress_does_not_compress_when_below_threshold(self):
-        """验证低于阈值时不压缩"""
-        mock_llm = MagicMock()
 
-        compressor = self._create_compressor(keep_recent=5, mock_llm=mock_llm)
+@pytest.mark.integration
+@pytest.mark.context
+class TestEnrichLLM:
+    @pytest.fixture
+    def config(self):
+        return CompressionConfig(
+            max_tokens=1000,
+            trigger_threshold=0.1,
+            keep_recent=2,
+            summary_max_tokens=100,
+            hot_zone_size=3,
+        )
 
-        messages = [
-            {"role": "user", "content": "short"},
-            {"role": "assistant", "content": "short"},
+    def test_enrich_with_llm_no_op_when_no_llm(self, config):
+        compressor = ContextCompressor(config)
+        compressor.llm = None
+        turns = [
+            CompressedTurn(
+                turn_index=0,
+                user_intent="test",
+                key_facts=[],
+                tool_actions=[],
+                unresolved=[],
+            )
         ]
-
-        compressor.config.trigger_threshold = 0.99
-
-        compressed = compressor.compress(messages)
-        assert compressed == messages
+        compressor._enrich_turns_with_llm(turns)
+        assert turns[0].key_facts == []

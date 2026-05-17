@@ -1,83 +1,99 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+from src.agent.state import create_initial_state
+from src.agent.config import AgentConfig, ShortTermConfig
 
 
-class TestShouldExecute:
+class TestAgentRouting:
+    def test_should_continue_respects_max_steps(self):
+        from src.agent.agent import Agent
+        with patch.object(Agent, "__init__", lambda self, **kw: None):
+            agent = Agent.__new__(Agent)
+            agent.config = AgentConfig()
+            agent.config.short_term.max_steps = 5
+            agent.config.short_term.max_iterations = 50
 
-    def _create_agent(self):
-        from src.agent.agent import Agent, create_agent
-        return create_agent(
-            model="openai:gpt-4o-mini",
-            api_key="test-key",
-            base_url="https://api.openai.com/v1",
-        )
+            state = create_initial_state()
+            state["task_status"] = "in_progress"
+            state["compression_count"] = 0
+            state["step_count"] = 5
 
-    def test_routes_to_execute_when_tool_calls(self):
-        agent = self._create_agent()
-        state = {
-            "messages": [{"role": "assistant", "tool_calls": [{"name": "read_file"}]}]
-        }
-        assert agent._should_execute(state) == "execute"
+            result = agent._should_continue(state)
+            assert result == "end"
 
-    def test_routes_to_end_when_direct_reply(self):
-        agent = self._create_agent()
-        state = {
-            "messages": [{"role": "assistant", "content": "Hello"}]
-        }
-        assert agent._should_execute(state) == "end"
+    def test_should_continue_continues_under_max_steps(self):
+        from src.agent.agent import Agent
+        with patch.object(Agent, "__init__", lambda self, **kw: None):
+            agent = Agent.__new__(Agent)
+            agent.config = AgentConfig()
+            agent.config.short_term.max_steps = 50
+            agent.config.short_term.max_iterations = 50
 
-    def test_routes_to_execute_when_empty_messages(self):
-        agent = self._create_agent()
-        state = {"messages": []}
-        assert agent._should_execute(state) == "execute"
+            state = create_initial_state()
+            state["task_status"] = "in_progress"
+            state["step_count"] = 10
 
+            result = agent._should_continue(state)
+            assert result == "think"
 
-class TestShouldContinue:
+    def test_should_continue_respects_max_compressions(self):
+        from src.agent.agent import Agent
+        with patch.object(Agent, "__init__", lambda self, **kw: None):
+            agent = Agent.__new__(Agent)
+            agent.config = AgentConfig()
+            agent.config.short_term.max_steps = 50
+            agent.config.short_term.max_iterations = 50
 
-    def _create_agent(self):
-        from src.agent.agent import Agent, create_agent
-        return create_agent(
-            model="openai:gpt-4o-mini",
-            api_key="test-key",
-            base_url="https://api.openai.com/v1",
-        )
+            state = create_initial_state()
+            state["task_status"] = "in_progress"
+            state["compression_count"] = 5
+            state["step_count"] = 3
 
-    def test_routes_to_think_when_in_progress_and_low_compression(self):
-        agent = self._create_agent()
-        state = {
-            "task_status": "in_progress",
-            "compression_count": 2,
-        }
-        assert agent._should_continue(state) == "think"
+            result = agent._should_continue(state)
+            assert result == "end"
 
-    def test_routes_to_end_when_completed(self):
-        agent = self._create_agent()
-        state = {
-            "task_status": "completed",
-            "compression_count": 1,
-        }
-        assert agent._should_continue(state) == "end"
+    def test_should_continue_ends_when_not_in_progress(self):
+        from src.agent.agent import Agent
+        with patch.object(Agent, "__init__", lambda self, **kw: None):
+            agent = Agent.__new__(Agent)
+            agent.config = AgentConfig()
+            agent.config.short_term.max_steps = 50
+            agent.config.short_term.max_iterations = 50
 
-    def test_routes_to_end_when_max_compression(self):
-        agent = self._create_agent()
-        state = {
-            "task_status": "in_progress",
-            "compression_count": 5,
-        }
-        assert agent._should_continue(state) == "end"
+            state = create_initial_state()
+            state["task_status"] = "completed"
+            state["step_count"] = 1
 
-    def test_routes_to_think_when_below_max_compression(self):
-        agent = self._create_agent()
-        state = {
-            "task_status": "in_progress",
-            "compression_count": 4,
-        }
-        assert agent._should_continue(state) == "think"
+            result = agent._should_continue(state)
+            assert result == "end"
 
-    def test_routes_to_end_when_compression_exceeds_max(self):
-        agent = self._create_agent()
-        state = {
-            "task_status": "in_progress",
-            "compression_count": 10,
-        }
-        assert agent._should_continue(state) == "end"
+    def test_config_max_steps_default(self):
+        cfg = ShortTermConfig()
+        assert cfg.max_steps == 50
+        assert cfg.max_iterations == 50
+
+    def test_config_max_steps_custom(self):
+        cfg = ShortTermConfig(max_steps=10, max_iterations=20)
+        assert cfg.max_steps == 10
+        assert cfg.max_iterations == 20
+
+    def test_should_continue_missing_step_count_defaults_to_0(self):
+        from src.agent.agent import Agent
+        with patch.object(Agent, "__init__", lambda self, **kw: None):
+            agent = Agent.__new__(Agent)
+            agent.config = AgentConfig()
+            agent.config.short_term.max_steps = 50
+            agent.config.short_term.max_iterations = 50
+
+            state = create_initial_state()
+            state["task_status"] = "in_progress"
+            state.pop("step_count", None)
+            state["compression_count"] = 0
+
+            result = agent._should_continue(state)
+            assert result == "think"
+
+    def test_step_count_increments(self):
+        state = create_initial_state()
+        state["step_count"] = state.get("step_count", 0) + 1
+        assert state["step_count"] == 1

@@ -1,6 +1,8 @@
 # AGENTS.md
 
-## Required Workflow
+## Workflow Rules
+
+**Git Push**: Do NOT push to remote until user confirms. Show `git status` and wait for approval.
 
 **每个新需求完成后，必须同步更新 README.md**
 - 包含架构图、业务架构图、数据流图
@@ -11,7 +13,35 @@
 - 每次确认任务后，必须生成 `TASK-{task_name}.md` 文档
 - 文档放在 `docs/tasks/` 目录下
 - 文档内容应包含：任务目标、当前进度、下一步计划、关键决策点
-- 便于后续断点续传，避免重复劳动
+
+## Testing Requirements
+
+**Every new feature MUST include tests**:
+- Mock tests: Use `unittest.mock` or `pytest.fixture` to mock LLM calls, file I/O
+- Real API tests: Support toggle via `USE_REAL_API=true` env var
+- Test config pattern: `os.getenv("USE_REAL_API", "false").lower() == "true"`
+
+```python
+# Test structure example
+def test_feature():
+    if os.getenv("USE_REAL_API", "false").lower() == "true":
+        # Real API test
+        result = actual_function()
+    else:
+        # Mock test
+        with patch("module.llm") as mock_llm:
+            mock_llm.invoke.return_value = "mocked"
+            result = actual_function()
+    assert result == expected
+```
+
+**Run tests**:
+```bash
+python -m pytest tests/ -v                    # All tests
+python -m pytest tests/test_file.py -v       # Single file
+python -m pytest -k "name"                   # By pattern
+USE_REAL_API=true python -m pytest tests/    # With real APIs
+```
 
 ## Quick Start
 
@@ -39,8 +69,6 @@ python -m src.agent.main --acp      # run ACP server (stdio JSON-RPC)
 | `mypy .` | Type check (strict mode) |
 | `langgraph dev` | LangGraph Studio (loads `src/agent/graph.py`) |
 | `python server.py` | Start HTTP + ACP server |
-| `python server.py --http` | HTTP only |
-| `python server.py --acp` | ACP only |
 
 **Order**: lint → typecheck → test
 
@@ -149,9 +177,10 @@ Tools are **manually iterated in `_node_execute`** (not LangGraph native `@tool`
 ## Docs
 
 - `README.md` — project overview (architecture/business/data flow diagrams)
+- `docs/context/context-design.md` — Context system data flow & architecture
+- `docs/context_design.md` — 4-layer memory model design spec
 - `docs/architecture/design-spec.md` — architecture spec
 - `docs/langchain-langgraph-deepagents-guide.md` — technical guide
 - `docs/agent-architecture-notes.md` — agent architecture principles
-- `docs/context_design.md` — 4-layer memory model detail
 - `docs/task-plan-product-operations.md` — product/ops implementation plan
 - `docs/metrics-observability-plan.md` — metrics & observability plan
