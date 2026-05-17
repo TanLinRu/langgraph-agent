@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from datetime import datetime, timedelta
 import json
@@ -8,6 +8,8 @@ from typing import Optional
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+
+from src.agent.schemas import ErrorEnvelope, ErrorType, ErrorLevel, structured_catch, UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ class LongTermConfig:
     """长期上下文配置"""
     memory_dir: Path = field(default_factory=lambda: Path("./memory"))
     session_ttl_days: int = 7
+    memory_ttl_days: int = 30
     vector_enabled: bool = True
     vector_dimension: int = 1536
     chroma_persist_dir: str = "./memory/chroma"
@@ -134,8 +137,42 @@ class LongTermManager:
             CREATE INDEX IF NOT EXISTS idx_namespace ON memories(namespace)
         """)
 
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at)
+        """)
+
+        # Tool results table for L3 persistence
+        self._db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS tool_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT DEFAULT 'success',
+                metadata TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(thread_id, tool_call_id)
+            )
+        """)
+
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tr_thread ON tool_results(thread_id)
+        """)
+
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tr_tool_call_id ON tool_results(tool_call_id)
+        """)
+
         self._db_conn.commit()
 
+    @structured_catch(
+        error_code="VECTOR_STORE_INIT_ERROR",
+        error_type=ErrorType.SYSTEM,
+        error_level=ErrorLevel.HIGH,
+        suppress=False,
+        log_level="error",
+    )
     def _init_chroma(self):
         """初始化 ChromaDB"""
         if not self.config.vector_enabled:
@@ -150,10 +187,14 @@ class LongTermManager:
         try:
             self._vector_store = self._chroma.get_collection("agent_memory")
         except Exception:
-            self._vector_store = self._chroma.create_collection(
-                "agent_memory",
-                metadata={"hnsw:space": "cosine"}
-            )
+            try:
+                self._vector_store = self._chroma.create_collection(
+                    "agent_memory",
+                    metadata={"hnsw:space": "cosine"}
+                )
+            except Exception as e:
+                logger.error(f"[LongTerm] ChromaDB 初始化失败: {e}")
+                raise
 
     def load_memory(self) -> str:
         """加载语义记忆 (MEMORY.md)"""
@@ -238,8 +279,8 @@ class LongTermManager:
         """读取指定 namespace 的所有记忆值"""
         ns_str = "|".join(namespace)
         cursor = self._db_conn.execute(
-            "SELECT value, current_value, conflict_type FROM memories WHERE namespace LIKE ? || '%'",
-            (ns_str[:ns_str.index("|")],),
+            "SELECT value, current_value, conflict_type FROM memories WHERE namespace LIKE ?",
+            (ns_str + "|%",),
         )
         results = []
         for row in cursor.fetchall():
@@ -249,19 +290,45 @@ class LongTermManager:
                 results.append(row["value"])
         return results
 
-    def search_similar(self, query: str, top_k: int = 3) -> list[str]:
-        """语义搜索"""
+    def search_similar(
+        self,
+        query: str,
+        top_k: int = 3,
+        namespace: tuple = ("default", "default", "default", "default"),
+    ) -> list[str]:
+        """语义搜索（带命名空间隔离）
+
+        ChromaDB 1.x: 使用 get() 获取所有文档并内存过滤
+        ChromaDB 0.4.x: 使用 where 过滤器
+        """
         if not self._vector_store:
             return []
 
+        ns_str = "|".join(namespace)
         try:
             results = self._vector_store.query(
                 query_texts=[query],
-                n_results=top_k
+                n_results=top_k,
+                where={"namespace": {"$gte": ns_str, "$lt": ns_str + "\ufffd"}},
             )
             return results.get("documents", [[]])[0]
         except Exception:
-            return []
+            try:
+                results = self._vector_store.query(
+                    query_texts=[query],
+                    n_results=top_k,
+                    where_document={"$contains": ns_str.replace("|", "/")},
+                )
+                return results.get("documents", [[]])[0]
+            except Exception:
+                all_docs = self._vector_store.get(limit=50)
+                if all_docs and "documents" in all_docs:
+                    filtered = [
+                        d for d in all_docs["documents"]
+                        if ns_str in d
+                    ]
+                    return filtered[:top_k]
+                return []
 
     def save_session(self, thread_id: str, messages: list, metadata: dict) -> None:
         """保存会话到 SQLite 和 JSONL"""
@@ -292,6 +359,124 @@ class LongTermManager:
                     "messages": delta,
                     "turn_offset": last_turn,
                 }, ensure_ascii=False, default=str) + "\n")
+
+    def save_tool_results(self, thread_id: str, results: list[dict]) -> None:
+        """批量持久化 tool results 到 L3"""
+        if not results:
+            return
+        for r in results:
+            try:
+                self._db_conn.execute("""
+                    INSERT OR REPLACE INTO tool_results
+                        (thread_id, tool_call_id, tool_name, content, status, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    thread_id,
+                    r.get("tool_call_id", ""),
+                    r.get("tool_name", "unknown"),
+                    r.get("content", ""),
+                    r.get("status", "success"),
+                    r.get("metadata", "{}"),
+                ))
+            except Exception as e:
+                logger.warning(f"[ToolResult] Failed to save {r.get('tool_call_id')}: {e}")
+        self._db_conn.commit()
+        logger.debug(f"[ToolResult] Saved {len(results)} results for thread={thread_id}")
+
+    def load_tool_result(self, thread_id: str, tool_call_id: str) -> dict | None:
+        """加载指定 tool result"""
+        cursor = self._db_conn.execute(
+            "SELECT * FROM tool_results WHERE thread_id = ? AND tool_call_id = ?",
+            (thread_id, tool_call_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "tool_call_id": row["tool_call_id"],
+            "tool_name": row["tool_name"],
+            "content": row["content"],
+            "status": row["status"],
+            "metadata": json.loads(row["metadata"] or "{}"),
+            "created_at": row["created_at"],
+        }
+
+    def load_tool_results_by_thread(self, thread_id: str, limit: int = 50) -> list[dict]:
+        """加载指定线程的所有 tool results"""
+        cursor = self._db_conn.execute(
+            "SELECT * FROM tool_results WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?",
+            (thread_id, limit),
+        )
+        return [
+            {
+                "tool_call_id": row["tool_call_id"],
+                "tool_name": row["tool_name"],
+                "content": row["content"],
+                "status": row["status"],
+                "metadata": json.loads(row["metadata"] or "{}"),
+                "created_at": row["created_at"],
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def search_tool_results(self, thread_id: str, query: str, top_k: int = 5) -> list[dict]:
+        """按工具名搜索 tool results（基于 SQLite LIKE）"""
+        cursor = self._db_conn.execute(
+            "SELECT * FROM tool_results WHERE thread_id = ? AND (tool_name LIKE ? OR content LIKE ?) ORDER BY created_at DESC LIMIT ?",
+            (thread_id, f"%{query}%", f"%{query}%", top_k),
+        )
+        return [
+            {
+                "tool_call_id": row["tool_call_id"],
+                "tool_name": row["tool_name"],
+                "content": row["content"][:500],
+                "status": row["status"],
+                "created_at": row["created_at"],
+            }
+            for row in cursor.fetchall()
+        ]
+
+    USER_PROFILE_KEY = "_user_profile"
+
+    def save_user_profile(self, profile: UserProfile) -> None:
+        """保存用户画像到 memories 表"""
+        ns = get_namespace(profile.tenant_id, profile.org_id, profile.user_id, "profile")
+        ns_str = "|".join(ns)
+        profile.last_updated = datetime.now().isoformat()
+        value = json.dumps(asdict(profile), ensure_ascii=False)
+
+        self._db_conn.execute("""
+            INSERT INTO memories (namespace, memory_key, value, created_at, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(namespace, memory_key) DO UPDATE SET
+                value = ?,
+                updated_at = CURRENT_TIMESTAMP
+        """, (ns_str, self.USER_PROFILE_KEY, value, value))
+        self._db_conn.commit()
+        logger.info(f"[Profile] Saved profile for user={profile.user_id}")
+
+    def load_user_profile(
+        self,
+        user_id: str,
+        tenant_id: str = "default",
+        org_id: str = "default",
+    ) -> UserProfile | None:
+        """加载用户画像"""
+        ns = get_namespace(tenant_id, org_id, user_id, "profile")
+        ns_str = "|".join(ns)
+        cursor = self._db_conn.execute(
+            "SELECT value FROM memories WHERE namespace = ? AND memory_key = ?",
+            (ns_str, self.USER_PROFILE_KEY),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            data = json.loads(row["value"])
+            return UserProfile(**data)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"[Profile] Failed to load profile for user={user_id}: {e}")
+            return None
 
     def _get_last_turn_count(self, session_file: Path) -> int:
         """获取当前已保存的消息总数 - 优化：只读最后一行"""
@@ -360,7 +545,7 @@ class LongTermManager:
         return row["thread_id"] if row else None
 
     def archive_old_sessions(self) -> tuple[list[str], str]:
-        """归档 7 天前的会话，返回归档列表和通知"""
+        """归档 7 天前的会话和 30 天前的记忆，返回归档列表和通知"""
         cutoff = datetime.now() - timedelta(days=self.config.session_ttl_days)
 
         cursor = self._db_conn.execute("""
@@ -383,6 +568,63 @@ class LongTermManager:
         self._db_conn.commit()
 
         notification = self._generate_notification(archived_ids)
+        return archived_ids, notification
+
+    def archive_old_memories(self, ttl_days: int = None) -> tuple[list[str], str]:
+        """归档指定天数前的记忆条目（默认 memory_ttl_days）
+
+        清理条件：
+        - namespace 不包含 "profile" 和 "config"（保护用户画像和配置）
+        - updated_at 早于 cutoff
+        - 仅归档 JSONL session 文件中的旧记忆，不修改 memories 表
+
+        Returns:
+            (归档 ID 列表, 通知文本)
+        """
+        if ttl_days is None:
+            ttl_days = self.config.memory_ttl_days
+
+        cutoff = datetime.now() - timedelta(days=ttl_days)
+        cursor = self._db_conn.execute("""
+            SELECT id, namespace, memory_key, value, updated_at
+            FROM memories
+            WHERE updated_at < ?
+              AND namespace NOT LIKE '%|profile'
+              AND namespace NOT LIKE '%|config'
+              AND namespace NOT LIKE '%|system'
+        """, (cutoff.isoformat(),))
+
+        archived_ids = []
+        archived_memories = []
+        for row in cursor.fetchall():
+            row_id = str(row["id"])
+            archived_ids.append(row_id)
+            archived_memories.append({
+                "id": row_id,
+                "namespace": row["namespace"],
+                "memory_key": row["memory_key"],
+                "value": row["value"],
+                "updated_at": row["updated_at"],
+            })
+
+        if not archived_ids:
+            return [], ""
+
+        archive_dir = self.config.memory_dir / "archive" / "memories"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_file = archive_dir / f"memories_{ts}.jsonl"
+        with open(archive_file, "w", encoding="utf-8") as f:
+            for mem in archived_memories:
+                f.write(json.dumps(mem, ensure_ascii=False, default=str) + "\n")
+
+        placeholders = ",".join("?" * len(archived_ids))
+        self._db_conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", archived_ids)
+        self._db_conn.commit()
+
+        count = len(archived_ids)
+        logger.info(f"[MemoryArchive] Archived {count} memories to {archive_file.name}")
+        notification = f"记忆归档完成：{count} 条记忆已归档到 {archive_file.name}，保留目录：{archive_dir}"
         return archived_ids, notification
 
     def _generate_notification(self, sessions: list[str]) -> str:

@@ -10,6 +10,8 @@ class ShortTermConfig(BaseModel):
     trigger_threshold: float = 0.7
     keep_recent: int = 5
     preserve_system: bool = True
+    max_steps: int = 50
+    max_iterations: int = 50
     model_config = ConfigDict(extra="ignore")
 
 

@@ -18,7 +18,7 @@ class RetrievalTrigger:
     触发条件（满足任一即触发）:
     1. token水位 > 40%
     2. 任务类型 in [planning, reflection, comparison]
-    3. 语义相似度 > 0.7
+    3. 向量语义相似度 > threshold (ChromaDB cosine)
     """
 
     def __init__(
@@ -26,9 +26,11 @@ class RetrievalTrigger:
         token_threshold: float = 0.4,
         semantic_threshold: float = 0.7,
         token_encoding_name: str = "cl100k_base",
+        long_term_manager=None,
     ):
         self.token_threshold = token_threshold
         self.semantic_threshold = semantic_threshold
+        self._long_term = long_term_manager
 
         try:
             import tiktoken
@@ -48,17 +50,14 @@ class RetrievalTrigger:
         Returns:
             (是否触发, 触发原因)
         """
-        # 维度1: Token 水位
         if self._check_token_threshold(state):
             return (True, "token_water_level")
 
-        # 维度2: 任务类型
         trigger_type = self._check_task_type(state)
         if trigger_type:
             return (True, f"task_type:{trigger_type}")
 
-        # 维度3: 语义相似度（需要 session_summary）
-        if session_summary and self._check_semantic_similarity(state, session_summary):
+        if self._check_semantic_similarity(state):
             return (True, "semantic_similarity")
 
         return (False, "")
@@ -106,11 +105,12 @@ class RetrievalTrigger:
 
         return None
 
-    def _check_semantic_similarity(self, state: "AgentState", session_summary: str) -> bool:
-        """检查语义相似度（简化版：Jaccard 关键词重叠）"""
-        if not session_summary or not self._encoding:
-            return False
+    def _check_semantic_similarity(self, state: "AgentState") -> bool:
+        """检查向量语义相似度（ChromaDB cosine similarity）
 
+        使用 ChromaDB 向量检索替代 Jaccard 关键词匹配。
+        当 long_term_manager 不可用时降级为 Jaccard（向后兼容）。
+        """
         messages = state.get("messages", [])
         if not messages:
             return False
@@ -120,20 +120,73 @@ class RetrievalTrigger:
             role = msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
             if role == "user":
                 content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-                current_input = content.lower()
+                current_input = content
                 break
 
         if not current_input:
             return False
 
-        summary_words = set(session_summary.lower().split())
-        input_words = set(current_input.split())
-        overlap = len(summary_words & input_words)
-        union = len(summary_words | input_words)
+        if not self._long_term:
+            if self._encoding and self.semantic_threshold < 1.0:
+                return self._jaccard_fallback(state)
+            return False
+
+        tenant_id = state.get("tenant_id", "default")
+        org_id = state.get("org_id", "default")
+        user_id = state.get("user_id", "default")
+        ns = (tenant_id, org_id, user_id, "memory")
+
+        results = self._long_term.search_similar(
+            query=current_input,
+            top_k=3,
+            namespace=ns,
+        )
+        if results and len(results) > 0:
+            similarity = results[0].get("_distance", 0)
+            if similarity is not None:
+                score = 1.0 - similarity
+                if score >= self.semantic_threshold:
+                    logger.debug(f"[RetrievalTrigger] Vector similarity triggered: score={score:.3f}")
+                    return True
+
+        return False
+
+    def _jaccard_fallback(self, state: "AgentState") -> bool:
+        """Jaccard 降级：当无 long_term_manager 时使用"""
+        if not self._encoding:
+            return False
+
+        messages = state.get("messages", [])
+        if not messages:
+            return False
+
+        all_content = " ".join(
+            _msg_content(m).lower()
+            for m in messages
+            if _msg_content(m) and isinstance(m, dict) and m.get("role") not in ("tool",)
+        )
+
+        if not all_content:
+            return False
+
+        current_words = set(all_content.split())
+        last_user = ""
+        for msg in reversed(messages):
+            role = msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
+            if role == "user":
+                last_user = (msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")).lower()
+                break
+
+        if not last_user:
+            return False
+
+        user_words = set(last_user.split())
+        overlap = len(current_words & user_words)
+        union = len(current_words | user_words)
         jaccard = overlap / union if union > 0 else 0
 
         if jaccard >= self.semantic_threshold:
-            logger.debug(f"[RetrievalTrigger] Semantic similarity triggered: {jaccard:.2f}")
+            logger.debug(f"[RetrievalTrigger] Jaccard fallback triggered: {jaccard:.2f}")
             return True
         return False
 
@@ -142,3 +195,9 @@ class RetrievalTrigger:
         if not self._encoding:
             return len(text) // 4
         return len(self._encoding.encode(text))
+
+
+def _msg_content(msg):
+    if isinstance(msg, dict):
+        return msg.get("content", "")
+    return getattr(msg, "content", str(msg))

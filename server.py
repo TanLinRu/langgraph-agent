@@ -10,9 +10,10 @@ import json
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from src.agent.schemas.agent_protocol import StructuredAgentError, ErrorLevel
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -146,6 +147,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LangGraph Agent API", lifespan=lifespan)
+
+
+@app.exception_handler(StructuredAgentError)
+async def structured_agent_error_handler(request: Request, exc: StructuredAgentError):
+    env = exc.to_envelope()
+    status_code = 500
+    if env.error_level in (ErrorLevel.HIGH, ErrorLevel.CRITICAL):
+        status_code = 500
+    elif env.error_level == ErrorLevel.MEDIUM:
+        status_code = 400
+    else:
+        status_code = 422
+    return JSONResponse(
+        status_code=status_code,
+        content=env.to_dict(),
+    )
+
 
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 app.add_middleware(

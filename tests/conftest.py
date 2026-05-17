@@ -3,8 +3,34 @@ import os
 import sys
 import logging
 from pathlib import Path
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 from typing import Generator
+
+
+def pytest_configure(config):
+    """Setup pytest file logging"""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / f"pytest-{timestamp}.log"
+
+    class UTF8FileHandler(logging.FileHandler):
+        def __init__(self, filename, **kwargs):
+            super().__init__(filename, encoding="utf-8", **kwargs)
+
+    file_handler = UTF8FileHandler(str(log_file))
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+
+    config._pytest_log_file = str(log_file)
 
 
 def should_use_real_api() -> bool:

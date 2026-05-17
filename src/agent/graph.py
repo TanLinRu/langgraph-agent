@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
@@ -131,6 +132,25 @@ def _node_init(state):
     return {"messages": messages}
 
 
+def _node_inject_profile(state):
+    """加载用户画像并注入到 system message"""
+    user_id = state.get("user_id", "default")
+    profile = long_term.load_user_profile(user_id)
+    if not profile:
+        return {}
+
+    profile_block = profile.to_system_block()
+    if not profile_block:
+        return {}
+
+    messages = list(state.get("messages", []))
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            msg["content"] = msg["content"] + "\n\n" + profile_block
+            break
+    return {"messages": messages}
+
+
 def _node_read_memory(state):
     """读取跨会话记忆 (设计参考: context_design.md 5.1)"""
     if not retrieval_trigger.should_retrieve(state):
@@ -243,23 +263,59 @@ def _node_save(state):
     return state
 
 
+def _node_cleanup_tools(state):
+    """清理已消费的 tool results（简化版，用于 LangGraph Studio）"""
+    messages = state.get("messages", [])
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    if not tool_msgs:
+        return {}
+
+    # 保留最近 10 条在消息列表中
+    keep_count = 10
+    to_keep = tool_msgs if len(tool_msgs) <= keep_count else tool_msgs[-keep_count:]
+
+    non_tool = [m for m in messages if m.get("role") != "tool"]
+    new_messages = non_tool + to_keep
+
+    # 更新 hot_tool_results
+    hot_tool_results = [
+        {
+            "tool_call_id": m.get("tool_call_id", ""),
+            "tool_name": m.get("name", "unknown"),
+            "summary": m.get("content", "")[:200],
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "access_count": 0,
+            "full_content": m.get("content", ""),
+            "is_hot": True,
+        }
+        for m in to_keep
+    ]
+
+    return {"messages": new_messages, "hot_tool_results": hot_tool_results}
+
+
 workflow = StateGraph(AgentState)
 workflow.add_node("init", _node_init)
+workflow.add_node("inject_profile", _node_inject_profile)
 workflow.add_node("read_memory", _node_read_memory)
 workflow.add_node("think", _node_think)
 workflow.add_node("execute", _node_execute)
 workflow.add_node("write_memory", _node_write_memory)
 workflow.add_node("compress", _node_compress)
 workflow.add_node("save", _node_save)
+workflow.add_node("cleanup_tools", _node_cleanup_tools)
+
 
 workflow.set_entry_point("init")
-workflow.add_edge("init", "read_memory")
+workflow.add_edge("init", "inject_profile")
+workflow.add_edge("inject_profile", "read_memory")
 workflow.add_edge("read_memory", "think")
 workflow.add_edge("execute", "compress")
 workflow.add_conditional_edges(
     "think",
     _should_execute,
-    {"execute": "execute", "end": END}
+    {"execute": "execute", "cleanup_tools": "cleanup_tools"}
 )
 workflow.add_edge("compress", "write_memory")
 workflow.add_edge("write_memory", "save")
@@ -268,6 +324,7 @@ workflow.add_conditional_edges(
     lambda s: "read_memory" if s.get("task_status") == "in_progress" and s.get("compression_count", 0) < 5 else "end",
     {"read_memory": "read_memory", "end": END}
 )
+workflow.add_edge("cleanup_tools", END)
 
 graph = workflow.compile()
 

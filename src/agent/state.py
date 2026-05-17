@@ -15,14 +15,41 @@ class ToolResultSummary(TypedDict):
     status: str  # success / failed
     timestamp: str
     access_count: int = 0
+    full_content: str = ""  # 热区条目保留完整原文
+    is_hot: bool = False     # 是否在热区中
+
+
+MODEL_FORMATTING_OVERHEAD = {
+    "gpt-4": 4,
+    "gpt-4o": 4,
+    "gpt-4o-mini": 4,
+    "gpt-3.5-turbo": 4,
+}
 
 
 def token_budget_reducer(existing: dict, new: dict) -> dict:
-    """Token 预算累加 + 百分比计算"""
+    """Token 预算累加 + 百分比计算
+
+    模型格式化 overhead（每条消息加 4 tokens，用于 role/content/timestamp 格式）
+    """
     result = dict(existing)
+    model = result.get("model", "gpt-4o")
+    overhead = MODEL_FORMATTING_OVERHEAD.get(model, 4)
+
     for key, value in new.items():
-        result[key] = result.get(key, 0) + value
-    result["percentage"] = round(result.get("messages", 0) / max(result.get("budget", 128000), 1) * 100, 1)
+        if key in ['model', 'budget']:
+            result[key] = value
+        else:
+            result[key] = result.get(key, 0) + value
+
+    msg_tokens = result.get("messages", 0)
+    overhead_tokens = result.get("message_count", 0) * overhead
+    total_with_overhead = msg_tokens + overhead_tokens
+
+    budget = result.get("budget", 128000)
+    result["percentage"] = round(total_with_overhead / max(budget, 1) * 100, 1)
+    result["total_with_overhead"] = total_with_overhead
+    result["overhead_tokens"] = overhead_tokens
     return result
 
 
@@ -43,7 +70,8 @@ class AgentState(TypedDict):
     """Agent 状态定义"""
     messages: Annotated[list, smart_message_reducer]
     thread_id: str
-    task_status: Literal["pending", "in_progress", "completed", "failed"]
+    user_id: str
+    task_status: Literal["pending", "in_progress", "completed", "failed", "paused", "aborted"]
     current_plan: list | None
     compression_count: int
     checkpoint: str | None
@@ -54,6 +82,10 @@ class AgentState(TypedDict):
     token_usage: Annotated[dict, token_budget_reducer]
     hot_tool_results: list[ToolResultSummary]
     injected_memory: list
+    step_count: int
+    current_action: str
+    last_error: dict | None
+    trace_id: str
 
 
 def create_initial_state(thread_id: str = "default") -> AgentState:
@@ -62,6 +94,7 @@ def create_initial_state(thread_id: str = "default") -> AgentState:
     return {
         "messages": [],
         "thread_id": thread_id,
+        "user_id": "default",
         "task_status": "pending",
         "current_plan": None,
         "compression_count": 0,
@@ -78,6 +111,10 @@ def create_initial_state(thread_id: str = "default") -> AgentState:
         },
         "hot_tool_results": [],
         "injected_memory": [],
+        "step_count": 0,
+        "current_action": "",
+        "last_error": None,
+        "trace_id": "",
     }
 
 

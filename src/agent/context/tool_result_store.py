@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -14,18 +15,27 @@ class ToolResultSummary:
     status: str  # success / failed
     timestamp: str
     access_count: int = 0
+    full_content: str = ""  # 热区条目保留完整原文
+    is_hot: bool = False     # 是否在热区中
 
 
 class ToolResultStore:
     """Tool Result 存储管理器 - LRU + 热度双因素淘汰
 
     设计参考: docs/context_design.md 4.1 节
+
+    热区大小默认为 10（当前轮 + 前一轮），淘汰时触发 on_evict 回调写入 L3。
     """
 
-    def __init__(self, hot_zone_size: int = 5):
+    def __init__(
+        self,
+        hot_zone_size: int = 10,
+        on_evict: Optional[Callable[[list[dict]], None]] = None,
+    ):
         self._cache: dict[str, dict] = {}  # tool_call_id -> full result
         self._hot_zone: list[ToolResultSummary] = []
         self._hot_zone_size = hot_zone_size
+        self._on_evict = on_evict
 
     def store(
         self,
@@ -54,6 +64,8 @@ class ToolResultStore:
             status=status,
             timestamp=now,
             access_count=0,
+            full_content=result,  # 热区保留完整原文
+            is_hot=True,
         )
 
         # 双因素淘汰: LRU + 热度
@@ -100,21 +112,39 @@ class ToolResultStore:
                 access_count=next(
                     (e.access_count for e in self._hot_zone if e.tool_call_id == tid), 0
                 ),
+                full_content="",
+                is_hot=tid in {e.tool_call_id for e in self._hot_zone},
             )
             for tid, data in self._cache.items()
         ]
 
     def _evict(self) -> None:
-        """双因素淘汰: 热度(访问次数)最低的移出 Hot Zone"""
+        """双因素淘汰: 热度最低的移出 Hot Zone，触发 L3 回调"""
         if not self._hot_zone:
             return
-        # 按热度升序，再按时间升序
         sorted_zone = sorted(
             self._hot_zone,
             key=lambda e: (e.access_count, e.timestamp),
         )
         evicted = sorted_zone[0]
         self._hot_zone.remove(evicted)
+
+        # 标记不再是热区
+        evicted.is_hot = False
+        evicted.full_content = ""
+
+        # 触发 L3 持久化回调
+        if self._on_evict:
+            try:
+                self._on_evict([{
+                    "tool_call_id": evicted.tool_call_id,
+                    "tool_name": evicted.tool_name,
+                    "content": self._cache.get(evicted.tool_call_id, {}).get("result", ""),
+                    "status": evicted.status,
+                }])
+            except Exception as e:
+                logger.warning(f"[ToolResultStore] on_evict failed: {e}")
+
         logger.debug(f"[ToolResultStore] Evicted {evicted.tool_call_id} (heat={evicted.access_count})")
 
     def _generate_summary(self, tool_name: str, result: str, status: str) -> str:

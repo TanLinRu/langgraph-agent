@@ -5,6 +5,7 @@ Retry Mechanism with Exponential Backoff
 - 工具重试装饰器
 - 指数退避策略
 - 重试配置
+- 预算感知重试
 """
 import asyncio
 import logging
@@ -12,6 +13,14 @@ import time
 from typing import Callable, Any, Optional
 from dataclasses import dataclass
 from functools import wraps
+
+from .schemas import (
+    ErrorEnvelope,
+    ErrorType,
+    ErrorLevel,
+    StructuredAgentError,
+    ERROR_CODES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +32,24 @@ class RetryConfig:
     max_delay: float = 30.0
     backoff_factor: float = 2.0
     retry_on_exceptions: tuple = (Exception,)
+
+
+# Per-component retry configurations (aligned with agent-flow-design.md)
+LLMRetryConfig = RetryConfig(
+    max_retries=3,
+    initial_delay=1.0,
+    backoff_factor=2.0,
+)
+ToolRetryConfig = RetryConfig(
+    max_retries=3,
+    initial_delay=0.5,
+    backoff_factor=2.0,
+)
+SupervisorRetryConfig = RetryConfig(
+    max_retries=2,
+    initial_delay=1.0,
+    backoff_factor=2.0,
+)
 
 
 def retry_with_backoff(config: RetryConfig = None):
@@ -114,6 +141,61 @@ class RetryManager:
     def reset(self):
         self._retry_counts.clear()
         self._total_retries = 0
+
+
+def retry_with_budget(
+    max_retries: int = 2,
+    estimated_retry_cost: float = 0.001,
+    circuit_breaker=None,
+):
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            remaining = kwargs.get("_remaining_budget")
+            if remaining is not None and remaining < estimated_retry_cost:
+                raise StructuredAgentError(
+                    error_code="BUDGET_EXHAUSTED",
+                    error_type=ErrorType.FATAL,
+                    message=f"预算不足 ({remaining} < {estimated_retry_cost})",
+                    retryable=False,
+                    error_level=ErrorLevel.CRITICAL,
+                )
+            if circuit_breaker and not circuit_breaker.can_execute():
+                raise StructuredAgentError(
+                    error_code="CIRCUIT_BREAKER_OPEN",
+                    error_type=ErrorType.RECOVERABLE,
+                    message="熔断器开启，跳过执行",
+                    retryable=True,
+                    error_level=ErrorLevel.HIGH,
+                )
+            return func(*args, **kwargs)
+
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs) -> Any:
+            remaining = kwargs.get("_remaining_budget")
+            if remaining is not None and remaining < estimated_retry_cost:
+                raise StructuredAgentError(
+                    error_code="BUDGET_EXHAUSTED",
+                    error_type=ErrorType.FATAL,
+                    message=f"预算不足 ({remaining} < {estimated_retry_cost})",
+                    retryable=False,
+                    error_level=ErrorLevel.CRITICAL,
+                )
+            if circuit_breaker and not circuit_breaker.can_execute():
+                raise StructuredAgentError(
+                    error_code="CIRCUIT_BREAKER_OPEN",
+                    error_type=ErrorType.RECOVERABLE,
+                    message="熔断器开启，跳过执行",
+                    retryable=True,
+                    error_level=ErrorLevel.HIGH,
+                )
+            return await func(*args, **kwargs)
+
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        return wrapper
+
+    return decorator
 
 
 _retry_manager: Optional[RetryManager] = None

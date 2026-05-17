@@ -170,5 +170,5 @@ class TestEnrichLLM:
                 unresolved=[],
             )
         ]
-        compressor._enrich_turns_with_llm(turns)
+        compressor._enrich_turns_with_llm(turns, [], [])
         assert turns[0].key_facts == []

@@ -9,7 +9,7 @@ import time
 import logging
 import os
 from datetime import datetime
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Union
 from dataclasses import dataclass, field
 
 from langgraph_supervisor import create_supervisor
@@ -17,6 +17,8 @@ from langgraph_supervisor import create_supervisor
 from .sub_agent_factory import build_sub_agent, _sanitize_agent_name
 from .event_bus import get_event_bus, ExecutionEvent
 from .event_callback import EventBusCallbackHandler
+from .schemas import ErrorEnvelope, ErrorType
+from .audit_logger import log_error
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ class SupervisorExecutionState:
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     elapsed_ms: int = 0
-    error: Optional[str] = None
+    error: Optional[Union[str, dict]] = None
     agent_names: list = field(default_factory=list)
     interrupted: bool = False
     can_resume: bool = False
@@ -327,8 +329,15 @@ class SupervisorManager:
 
         except Exception as e:
             logger.error(f"[Supervisor] Execution failed: {e}", exc_info=True)
-            state.status = "failed"
-            state.error = str(e)
+            env = ErrorEnvelope.from_exception(
+                e,
+                error_code="SUPERVISOR_ERROR",
+                error_type=ErrorType.RECOVERABLE,
+                tool_name="supervisor",
+            )
+            state.error = env.to_dict()
+            log_error(state.error, trace_id=getattr(state, "execution_id", ""),
+                      context={"graph_id": getattr(state, "graph_id", "")})
 
         end_time = datetime.now()
         state.end_time = end_time.isoformat()
@@ -380,7 +389,14 @@ class SupervisorManager:
 
         except Exception as e:
             logger.error(f"[Supervisor] Stream failed: {e}", exc_info=True)
-            yield {"type": "error", "error": str(e)}
+            env_dict = ErrorEnvelope.from_exception(
+                e,
+                error_code="SUPERVISOR_STREAM_ERROR",
+                error_type=ErrorType.RECOVERABLE,
+                tool_name="supervisor",
+            ).to_dict()
+            log_error(env_dict, trace_id=execution_id, context={"graph_id": graph_id})
+            yield {"type": "error", "error": env_dict}
 
     def get_execution(self, execution_id: str) -> Optional[SupervisorExecutionState]:
         """获取执行状态。"""

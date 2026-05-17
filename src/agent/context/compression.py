@@ -5,6 +5,7 @@ import logging
 from langchain_core.language_models import BaseChatModel
 
 from .tool_result_store import ToolResultStore, ToolResultSummary
+from src.agent.schemas import ErrorEnvelope, ErrorType, ErrorLevel, structured_catch
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,14 @@ class CompressionResult:
     compressed_count: int
     compression_ratio: float
     token_saved: int
+    errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+    def has_errors(self) -> bool:
+        return len(self.errors) > 0
+
+    def has_warnings(self) -> bool:
+        return len(self.warnings) > 0
 
 
 class ContextCompressor:
@@ -84,84 +93,149 @@ class ContextCompressor:
         ratio = total_tokens / self.config.max_tokens
         return ratio >= self.config.trigger_threshold
 
-    def compress(self, messages: list) -> list:
-        """执行 LLM 摘要压缩"""
+    def _dump_messages_debug(self, messages: list, tag: str) -> None:
+        """Dump full message content to DEBUG log"""
+        logger.debug("")
+        logger.debug(f"=== [{tag}] {len(messages)} messages ===")
+        for i, msg in enumerate(messages):
+            role = _msg_role(msg)
+            content = _msg_content(msg)
+            tokens = self._count_tokens([msg])
+            logger.debug(f"  [{i}] {role} ({tokens} tokens):")
+            if isinstance(content, str):
+                for line in content.split("\n"):
+                    if line.strip():
+                        logger.debug(f"      {line}")
+            else:
+                logger.debug(f"      {content}")
+            logger.debug(f"  [end msg {i}]")
+
+    def compress(self, messages: list) -> "CompressionResult":
+        """Execute LLM summary compression"""
+        errors = []
+        warnings = []
+
+        logger.debug(f"")
+        logger.debug(f"=== [COMPRESSION] compress() called with {len(messages)} messages ===")
+        self._dump_messages_debug(messages, "COMPRESS_INPUT")
+
         if not self.should_compress(messages):
-            return messages
+            logger.info(f"[COMPRESSION] Should not compress: {self._count_tokens(messages)} tokens < {self.config.max_tokens * self.config.trigger_threshold:.0f} threshold")
+            return CompressionResult(
+                compressed_messages=messages,
+                compressed_turns=[],
+                original_count=len(messages),
+                compressed_count=len(messages),
+                compression_ratio=1.0,
+                token_saved=0,
+                errors=errors,
+                warnings=warnings,
+            )
 
         system = [m for m in messages if _msg_role(m) == "system"]
-        tools = [m for m in messages if _msg_role(m) == "tool"]
         user_assistant = [m for m in messages if _msg_role(m) in ("user", "assistant")]
 
+        logger.debug(f"[COMPRESSION] Partition: system={len(system)}, user_assistant={len(user_assistant)}")
+
         if not user_assistant:
-            return messages
+            return CompressionResult(
+                compressed_messages=messages,
+                compressed_turns=[],
+                original_count=len(messages),
+                compressed_count=len(messages),
+                compression_ratio=1.0,
+                token_saved=0,
+                errors=errors,
+                warnings=warnings,
+            )
 
-        for tool_msg in tools:
-            tool_call_id = _msg_id(tool_msg)
-            tool_name = _msg_get(tool_msg, "name", "unknown")
-            content = _msg_content(tool_msg)
-            status = "success" if _msg_role(tool_msg) == "tool" else "failed"
-            if tool_call_id:
-                self._tool_store.store(tool_call_id, tool_name, content, status)
+        try:
+            compressed_turns = self._build_compressed_turns(user_assistant)
+            logger.debug(f"[COMPRESSION] Built {len(compressed_turns)} compressed turns")
 
-        compressed_turns = self._build_compressed_turns(user_assistant, tools)
-        self._enrich_turns_with_llm(compressed_turns)
-        summary = self._llm_summarize_turns(compressed_turns)
+            self._enrich_turns_with_llm(compressed_turns, errors, warnings)
 
-        recent_conversations = user_assistant[-self.config.keep_recent:]
-        hot_zone_summaries = self._tool_store.get_hot_zone()
+            summary = self._llm_summarize_turns(compressed_turns, errors, warnings)
+            logger.debug(f"[COMPRESSION] LLM summary length: {len(summary)} chars")
 
-        compressed = []
-        compressed.extend(system)
-        compressed.append({
-            "role": "system",
-            "content": f"【之前对话摘要】\n{summary[:self.config.summary_max_tokens * 4]}",
-            "name": "context_summary",
-            "compressed_turns": [self._turn_to_dict(ct) for ct in compressed_turns],
-        })
-        compressed.extend(recent_conversations)
-        for hs in hot_zone_summaries:
-            compressed.append({
-                "role": "tool",
-                "tool_call_id": hs.tool_call_id,
-                "name": hs.tool_name,
-                "content": hs.summary,
-                "status": hs.status,
-                "is_hot_zone": True,
-            })
+            recent_conversations = user_assistant[-self.config.keep_recent:]
 
-        original_tokens = self._count_tokens(messages)
-        compressed_tokens = self._count_tokens(compressed)
-        logger.info(
-            f"[LLM Compress] Compressed: {len(messages)} msgs / {original_tokens} tokens"
-            f" -> {len(compressed)} msgs / {compressed_tokens} tokens"
-        )
+            compressed = []
+            if system:
+                merged_content = "\n\n".join(m.get("content", "") for m in system)
+                summary_content = f"\n\n【之前对话摘要】\n{summary[:self.config.summary_max_tokens * 4]}"
+                merged_system = {
+                    "role": "system",
+                    "content": merged_content + summary_content,
+                    "name": "context_summary",
+                    "compressed_turns": [self._turn_to_dict(ct) for ct in compressed_turns],
+                }
+                compressed.append(merged_system)
+            else:
+                compressed.append({
+                    "role": "system",
+                    "name": "context_summary",
+                    "content": f"【之前对话摘要】\n{summary[:self.config.summary_max_tokens * 4]}",
+                    "compressed_turns": [self._turn_to_dict(ct) for ct in compressed_turns],
+                })
+            compressed.extend(recent_conversations)
 
-        return compressed
+            logger.debug(f"[COMPRESSION] Built compressed result: system={len(system)} merged, recent={len(recent_conversations)}")
+            self._dump_messages_debug(compressed, "COMPRESS_OUTPUT")
 
-    def _enrich_turns_with_llm(self, turns: list[CompressedTurn]) -> None:
+            original_tokens = self._count_tokens(messages)
+            compressed_tokens = self._count_tokens(compressed)
+            logger.info(
+                f"[LLM Compress] Compressed: {len(messages)} msgs / {original_tokens} tokens"
+                f" -> {len(compressed)} msgs / {compressed_tokens} tokens"
+            )
+
+            return CompressionResult(
+                compressed_messages=compressed,
+                compressed_turns=compressed_turns,
+                original_count=len(messages),
+                compressed_count=len(compressed),
+                compression_ratio=len(compressed) / max(len(messages), 1),
+                token_saved=original_tokens - compressed_tokens,
+                errors=errors,
+                warnings=warnings,
+            )
+        except Exception as e:
+            errors.append({"phase": "compression", "error": str(e), "type": type(e).__name__})
+            logger.error(f"[COMPRESSION] Failed: {e}")
+            return CompressionResult(
+                compressed_messages=messages,
+                compressed_turns=[],
+                original_count=len(messages),
+                compressed_count=len(messages),
+                compression_ratio=1.0,
+                token_saved=0,
+                errors=errors,
+                warnings=warnings,
+            )
+
+    def _enrich_turns_with_llm(self, turns: list[CompressedTurn], errors: list, warnings: list) -> None:
         """LLM 提取 key_facts 和 unresolved (OpenCode 模式)"""
         if not self.llm or not turns:
             return
 
-        try:
-            turn_texts = []
-            for t in turns:
-                tool_names = [a["name"] for a in t.tool_actions] if t.tool_actions else ["无"]
-                turn_texts.append(
-                    f"Turn {t.turn_index}: 意图={t.user_intent[:100]} | "
-                    f"工具={', '.join(tool_names)}"
-                )
+        turn_texts = []
+        for t in turns:
+            tool_names = [a["name"] for a in t.tool_actions] if t.tool_actions else ["无"]
+            turn_texts.append(
+                f"Turn {t.turn_index}: 意图={t.user_intent[:100]} | "
+                f"工具={', '.join(tool_names)}"
+            )
 
-            prompt = f"""分析以下对话轮次，提取关键信息。
+        prompt = f"""分析以下对话轮次，提取关键信息。
 
 对于每个轮次，请用 JSON 格式返回：
 {{
   "turns": [
     {{
       "turn_index": 数字,
-      "key_facts": ["关键事实1", "关键事实2"],  // 提取的技术约束、需求、决策
-      "unresolved": ["待解决问题1", "待解决问题2"]  // 检测到的未完成事项
+      "key_facts": ["关键事实1", "关键事实2"],
+      "unresolved": ["待解决问题1", "待解决问题2"]
     }}
   ]
 }}
@@ -171,6 +245,7 @@ class ContextCompressor:
 
 JSON："""
 
+        try:
             response = self.llm.invoke(prompt)
             content = response.content if hasattr(response, "content") else str(response)
             import json
@@ -187,34 +262,41 @@ JSON："""
                         turn.unresolved = info.get("unresolved", [])
             logger.info(f"[LLM Enrich] Extracted facts/unresolved for {len(turns)} turns")
         except Exception as e:
+            error_msg = f"LLM enrichment failed: {e}"
             logger.warning(f"[LLM Enrich] Failed: {e}, using empty fields")
+            warnings.append({"phase": "llm_enrichment", "warning": error_msg, "type": type(e).__name__})
 
     def _build_compressed_turns(
-        self, user_assistant: list, tools: list
+        self, user_assistant: list
     ) -> list[CompressedTurn]:
-        """将 user/assistant 对转换为 CompressedTurn 结构化记录"""
+        """将 user/assistant 对转换为 CompressedTurn 结构化记录
+
+        工具名从 assistant 消息的 tool_calls 字段提取，不含结果内容。
+        完整 tool result 已由 _node_cleanup_tools 持久化到 L3。
+        """
         turns = []
-        tool_map: dict[str, list[dict]] = {}
 
-        # 按 tool_call_id 聚合 tool results
-        for tool_msg in tools:
-            tc_id = _msg_id(tool_msg)
-            if tc_id:
-                tool_map.setdefault(tc_id, [])
-                tool_map[tc_id].append({
-                    "name": _msg_get(tool_msg, "name", "unknown"),
-                    "content": _msg_content(tool_msg)[:200],
-                    "status": "success" if _msg_role(tool_msg) == "tool" else "failed",
-                })
-
-        # 将 user/assistant pair 转换为 turn
         for i, msg in enumerate(user_assistant):
             if _msg_role(msg) == "user":
+                # 找到紧随其后的 assistant 消息获取 tool_calls
+                next_assistant = None
+                if i + 1 < len(user_assistant) and _msg_role(user_assistant[i + 1]) == "assistant":
+                    next_assistant = user_assistant[i + 1]
+
+                tool_actions = []
+                if next_assistant:
+                    tool_calls = _msg_get(next_assistant, "tool_calls", [])
+                    for tc in tool_calls:
+                        tool_actions.append({
+                            "name": _msg_get(tc, "name", "unknown"),
+                            "arguments": str(_msg_get(tc, "arguments", {}))[:200],
+                        })
+
                 turn = CompressedTurn(
                     turn_index=i // 2,
                     user_intent=_msg_content(msg)[:200],
                     key_facts=[],
-                    tool_actions=tool_map.get(_msg_id(msg), []),
+                    tool_actions=tool_actions,
                     unresolved=[],
                     compression_rationale="超过保留轮次，压缩归档",
                 )
@@ -232,7 +314,7 @@ JSON："""
             "compression_rationale": turn.compression_rationale,
         }
 
-    def _llm_summarize_turns(self, turns: list[CompressedTurn]) -> str:
+    def _llm_summarize_turns(self, turns: list[CompressedTurn], errors: list, warnings: list) -> str:
         """基于结构化 turns 生成摘要"""
         if not self.llm:
             return self._fallback_summarize_turns(turns)
@@ -268,7 +350,9 @@ JSON："""
             return response.content if hasattr(response, "content") else str(response)
         except Exception as e:
             elapsed = time.time() - start_time
+            error_msg = f"LLM summarization failed: {e}"
             logger.error(f"[LLM Summarize] Failed after {elapsed:.2f}s: {e}")
+            errors.append({"phase": "llm_summarization", "error": error_msg, "type": type(e).__name__})
             return self._fallback_summarize_turns(turns)
 
     def _fallback_summarize_turns(self, turns: list[CompressedTurn]) -> str:
@@ -316,7 +400,9 @@ JSON："""
             return response.content if hasattr(response, "content") else str(response)
         except Exception as e:
             elapsed = time.time() - start_time
+            error_msg = f"LLM summarization failed: {e}"
             logger.error(f"[LLM Summarize] Failed after {elapsed:.2f}s: {e}")
+            errors.append({"phase": "llm_summarization", "error": error_msg, "type": type(e).__name__})
             return self._fallback_summarize(messages)
 
     def _fallback_summarize(self, messages: list) -> str:

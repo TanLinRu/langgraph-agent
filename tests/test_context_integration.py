@@ -182,7 +182,7 @@ class TestContextIntegration:
     def test_hot_zone_tool_results_preserved(
         self, compressor_with_mock_llm, long_conversation
     ):
-        """Mock: Hot Zone 工具结果保留"""
+        """Mock: Hot Zone 工具结果不再注入压缩输出（已由 cleanup_tools 处理）"""
         result = compressor_with_mock_llm.compress(long_conversation)
         compressed = result.compressed_messages
 
@@ -190,7 +190,11 @@ class TestContextIntegration:
             m for m in compressed
             if m.get("is_hot_zone")
         ]
-        assert len(hot_zone_msgs) >= 0
+        assert len(hot_zone_msgs) == 0
+
+        # 验证压缩只包含 system + recent user/assistant 消息
+        roles = [m.get("role") for m in compressed]
+        assert "tool" not in roles
 
     def test_compressed_turn_structure(
         self, compressor_with_mock_llm, long_conversation

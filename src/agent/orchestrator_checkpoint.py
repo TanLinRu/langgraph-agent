@@ -8,12 +8,13 @@ Orchestrator Checkpoint - 工作流检查点持久化
 """
 import json
 import logging
-import os
-from datetime import datetime
+import traceback
 from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Union
 
 from .state import OrchestratorState, OrchestratorStep
+from .audit_logger import log_error
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,13 @@ class OrchestratorCheckpoint:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return True
         except Exception as e:
-            logger.error(f"[Checkpoint] Failed to save {state.orchestration_id}: {e}")
+            logger.error(f"[Checkpoint] Failed to save {state.orchestration_id}: {e}\n{traceback.format_exc()}")
+            log_error({
+                "error_code": "CHECKPOINT_SAVE_ERROR",
+                "error_type": "system",
+                "error_level": 2,
+                "message": str(e),
+            }, context={"orchestration_id": state.orchestration_id})
             return False
 
     def load(self, orchestration_id: str) -> Optional[OrchestratorState]:
@@ -108,7 +115,13 @@ class OrchestratorCheckpoint:
                 replan_count=data.get("replan_count", 0),
             )
         except Exception as e:
-            logger.error(f"[Checkpoint] Failed to load {orchestration_id}: {e}")
+            logger.error(f"[Checkpoint] Failed to load {orchestration_id}: {e}\n{traceback.format_exc()}")
+            log_error({
+                "error_code": "CHECKPOINT_LOAD_ERROR",
+                "error_type": "system",
+                "error_level": 2,
+                "message": str(e),
+            }, context={"orchestration_id": orchestration_id})
             return None
 
     def delete(self, orchestration_id: str) -> bool:
@@ -119,7 +132,13 @@ class OrchestratorCheckpoint:
                 path.unlink()
             return True
         except Exception as e:
-            logger.error(f"[Checkpoint] Failed to delete {orchestration_id}: {e}")
+            logger.error(f"[Checkpoint] Failed to delete {orchestration_id}: {e}\n{traceback.format_exc()}")
+            log_error({
+                "error_code": "CHECKPOINT_DELETE_ERROR",
+                "error_type": "system",
+                "error_level": 2,
+                "message": str(e),
+            }, context={"orchestration_id": orchestration_id})
             return False
 
     def list_all(self) -> list[dict]:
@@ -138,7 +157,14 @@ class OrchestratorCheckpoint:
                         "created_at": data.get("created_at", ""),
                         "updated_at": data.get("updated_at", ""),
                     })
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[Checkpoint] 解析失败 {path}: {e}\n{traceback.format_exc()}")
+                log_error({
+                    "error_code": "CHECKPOINT_PARSE_ERROR",
+                    "error_type": "system",
+                    "error_level": 1,
+                    "message": str(e),
+                }, context={"path": str(path)})
                 continue
         return result
 

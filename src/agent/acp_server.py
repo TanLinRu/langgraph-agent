@@ -10,6 +10,8 @@ import logging
 from typing import Any
 from dataclasses import dataclass
 
+from .schemas.agent_protocol import ErrorEnvelope, ErrorType, ErrorLevel, StructuredAgentError
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -80,18 +82,39 @@ class ACPServer:
             elif method == "ping":
                 result = {"status": "ok"}
             else:
+                env = ErrorEnvelope(
+                    error_code="METHOD_NOT_FOUND",
+                    error_type=ErrorType.FATAL,
+                    message=f"Method not found: {method}",
+                    retryable=False,
+                    error_level=ErrorLevel.HIGH,
+                )
                 return ACPResponse(
                     id=req.id,
-                    error={"code": -32601, "message": f"Method not found: {method}"},
+                    error={"code": -32601, "message": env.message, "data": env.to_dict()},
                 )
 
             return ACPResponse(id=req.id, result=result)
 
-        except Exception as e:
-            logger.error(f"Error handling {req.method}: {e}")
+        except StructuredAgentError as e:
+            env = e.to_envelope()
+            logger.error(f"Error handling {req.method}: {env.message}")
             return ACPResponse(
                 id=req.id,
-                error={"code": -32603, "message": str(e)},
+                error={"code": -32603, "message": env.message, "data": env.to_dict()},
+            )
+        except Exception as e:
+            logger.error(f"Error handling {req.method}: {e}")
+            env = ErrorEnvelope(
+                error_code="ACP_HANDLER_ERROR",
+                error_type=ErrorType.RECOVERABLE,
+                message=str(e),
+                retryable=True,
+                error_level=ErrorLevel.MEDIUM,
+            )
+            return ACPResponse(
+                id=req.id,
+                error={"code": -32603, "message": env.message, "data": env.to_dict()},
             )
 
     async def _initialize(self, params: dict) -> dict:

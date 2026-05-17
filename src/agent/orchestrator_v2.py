@@ -323,7 +323,7 @@ class DynamicOrchestrator:
             approved = await self.request_step_approval(orchestration_id, step_id)
             if not approved:
                 step.status = "rejected"
-                step.error = "Rejected by user"
+                step.error = "审批被拒绝或超时"
                 await self._publish_step_update(orchestration_id, step)
                 return step
 
@@ -398,8 +398,8 @@ class DynamicOrchestrator:
         _step_approvals[orchestration_id][step_id] = event
 
         try:
-            approved = await asyncio.wait_for(event.wait(), timeout=timeout)
-            return approved
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            return getattr(event, "_approved", True)
         except asyncio.TimeoutError:
             logger.warning(f"[Orchestrator] Step {step_id} approval timeout")
             return False

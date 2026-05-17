@@ -152,7 +152,15 @@ class ACPClient:
                     return r.get("content", str(r))
                 return str(r)
             if "error" in result:
-                return f"Error: {result['error']}"
+                err = result["error"]
+                if isinstance(err, dict):
+                    data = err.get("data", {})
+                    code = err.get("code", -32603)
+                    msg = err.get("message", str(err))
+                    error_code = data.get("error_code", "UNKNOWN")
+                    error_type = data.get("error_type", "unknown")
+                    return f"Error [code={code}] [{error_code}/{error_type}] {msg}"
+                return f"Error: {err}"
             
             return "No response"
             
@@ -193,7 +201,15 @@ class ACPClient:
                 r = result["result"]
                 return r.get("content", str(r)) if isinstance(r, dict) else str(r)
             if "error" in result:
-                return f"Error: {result['error']}"
+                err = result["error"]
+                if isinstance(err, dict):
+                    data = err.get("data", {})
+                    code = err.get("code", -32603)
+                    msg = err.get("message", str(err))
+                    error_code = data.get("error_code", "UNKNOWN")
+                    error_type = data.get("error_type", "unknown")
+                    return f"Error [code={code}] [{error_code}/{error_type}] {msg}"
+                return f"Error: {err}"
             
             return "No response"
             

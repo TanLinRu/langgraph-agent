@@ -104,11 +104,11 @@ class HumanInTheLoop:
         logger.info(f"[HITL] Approval requested: {request_id} ({approval_type.value})")
 
         try:
-            approved = await asyncio.wait_for(
+            await asyncio.wait_for(
                 self._approval_events[request_id].wait(),
                 timeout=timeout
             )
-            return approved
+            return request.status == ApprovalStatus.APPROVED
         except asyncio.TimeoutError:
             request.status = ApprovalStatus.EXPIRED
             logger.warning(f"[HITL] Approval expired: {request_id}")
