@@ -275,12 +275,23 @@ class Agent:
         return "end"
 
     def _should_continue(self, state: AgentState) -> str:
-        """判断是否继续循环"""
+        """判断是否继续循环
+
+        终止条件（满足任一即停止）:
+        1. step_count >= max_steps
+        2. step_count >= max_iterations
+        3. compression_count >= 5
+        4. token_budget >= 90%
+        5. 重复无进展（early_stopping_method）
+        6. Final Answer 检测
+        7. 连续同质工具调用检测
+        """
         task_status = state.get("task_status")
         compression_count = state.get("compression_count", 0)
         step_count = state.get("step_count", 0)
         max_steps = self.config.short_term.max_steps
         max_iterations = self.config.short_term.max_iterations
+        messages = state.get("messages", [])
 
         if step_count >= max_steps:
             logger.warning(f"[Route] max_steps={max_steps} reached, forcing END")
@@ -299,7 +310,18 @@ class Agent:
             return "end"
         if budget_pct >= 75:
             logger.warning(f"[Route] token_budget={budget_pct}% (>=75%), triggering compression warning")
-            # Allow one more step but signal compression soon
+
+        if self._detect_early_stopping(messages):
+            logger.warning(f"[Route] Early stopping triggered: repetitive responses detected")
+            return "end"
+
+        if self._detect_final_answer(messages):
+            logger.warning(f"[Route] Early stopping triggered: Final Answer detected")
+            return "end"
+
+        if self._detect_homogeneous_tool_calls(messages):
+            logger.warning(f"[Route] Early stopping triggered: repetitive tool calls detected")
+            return "end"
 
         should_continue = task_status == "in_progress"
         logger.info(
@@ -310,6 +332,66 @@ class Agent:
             f"continue={should_continue}"
         )
         return "think" if should_continue else "end"
+
+    def _detect_early_stopping(self, messages: list) -> bool:
+        """检测重复无进展（early_stopping_method）
+
+        检查最后 N 条 assistant 回复是否有相同内容。
+        连续 3 条相同 → 触发停止。
+        """
+        assistant_msgs = []
+        for msg in reversed(messages):
+            if _msg_get(msg, "role") == "assistant":
+                content = _msg_get(msg, "content", "") or ""
+                tool_calls = _msg_get(msg, "tool_calls", []) or []
+                if content.strip():
+                    assistant_msgs.append(content.strip()[:200])
+                if len(assistant_msgs) >= 3:
+                    break
+
+        if len(assistant_msgs) >= 3:
+            return assistant_msgs[0] == assistant_msgs[1] == assistant_msgs[2]
+        return False
+
+    def _detect_final_answer(self, messages: list) -> bool:
+        """检测 Final Answer
+
+        检查最后一条 assistant 回复是否包含 Final Answer 标记。
+        """
+        for msg in reversed(messages):
+            if _msg_get(msg, "role") == "assistant":
+                content = _msg_get(msg, "content", "") or ""
+                final_markers = ["Final Answer:", "最终答案:", "任务完成", "已完成任务"]
+                for marker in final_markers:
+                    if marker in content:
+                        return True
+                return False
+        return False
+
+    def _detect_homogeneous_tool_calls(self, messages: list) -> bool:
+        """检测连续同质工具调用
+
+        同一个工具连续调用 >= 3 次且参数相似 → 触发停止。
+        """
+        tool_sequence = []
+        for msg in reversed(messages):
+            if _msg_get(msg, "role") == "assistant":
+                tool_calls = _msg_get(msg, "tool_calls", []) or []
+                for tc in tool_calls:
+                    tool_sequence.append((
+                        _msg_get(tc, "name", ""),
+                        str(_msg_get(tc, "arguments", {}))[:100],
+                    ))
+                if len(tool_sequence) >= 3:
+                    break
+
+        if len(tool_sequence) < 3:
+            return False
+
+        last_three = tool_sequence[:3]
+        names = [t[0] for t in last_three]
+        args = [t[1] for t in last_three]
+        return names[0] == names[1] == names[2] and args[0] == args[1] == args[2]
 
     def _node_init(self, state: AgentState) -> AgentState:
         """初始化节点 - 避免重复添加 system 消息"""
@@ -453,6 +535,21 @@ Status: {sop_state.get('status')}
         max_retries = LLMRetryConfig.max_retries
         delay = LLMRetryConfig.initial_delay
         last_exception = None
+
+        # Budget pre-check: refuse retry if cost already exceeds budget
+        total_cost = self._metrics.get("total_cost", 0)
+        estimated_retry_cost = 0.002 * (max_retries + 1)
+        max_budget = 0.10
+        remaining = max_budget - total_cost
+        if remaining < estimated_retry_cost:
+            raise StructuredAgentError(
+                error_code="BUDGET_EXHAUSTED",
+                error_type=ErrorType.FATAL,
+                message=f"Budget exhausted (${total_cost:.4f} used, ${remaining:.4f} remaining, needs ${estimated_retry_cost:.4f})",
+                retryable=False,
+                error_level=ErrorLevel.CRITICAL,
+                trace_id=state.get("trace_id", ""),
+            )
 
         for attempt in range(max_retries + 1):
             try:
@@ -667,6 +764,18 @@ Status: {sop_state.get('status')}
                     retry_delay = ToolRetryConfig.initial_delay
                     last_error = None
 
+                    # Budget pre-check: refuse tool retry if cost too high
+                    total_cost = self._metrics.get("total_cost", 0)
+                    estimated_tool_retry_cost = 0.0005 * (max_retries + 1)
+                    max_budget = 0.10
+                    if total_cost + estimated_tool_retry_cost > max_budget:
+                        results.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": f"错误: 预算不足（已用 ${total_cost:.4f}，预估重试需 ${estimated_tool_retry_cost:.4f}）",
+                            "status": "failed",
+                        })
+                        break
                     for attempt in range(max_retries + 1):
                         try:
                             result = t.invoke(tool_input)
