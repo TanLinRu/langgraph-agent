@@ -4,7 +4,7 @@ Rate Limiter and Circuit Breaker
 提供:
 - 请求频率限制 (RPM)
 - 成本熔断器 (防止异常费用)
-- 工具级别熔断器
+- 工具级别熔断器 (可选 Redis 持久化)
 """
 import time
 import logging
@@ -13,6 +13,13 @@ from typing import Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+try:
+    import redis as redis_module
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    redis_module = None
 
 
 @dataclass
@@ -151,15 +158,73 @@ class CircuitBreaker:
         self.last_failure_time = None
 
 
+class RedisCircuitBreaker(CircuitBreaker):
+    """熔断器 - 带可选 Redis 持久化"""
+
+    def __init__(self, redis_client=None, key="", **kwargs):
+        super().__init__(**kwargs)
+        self._redis = redis_client
+        self._redis_key = key
+        if self._redis and self._redis_key:
+            self._load_from_redis()
+
+    def _load_from_redis(self):
+        try:
+            data = self._redis.hgetall(self._redis_key)
+            if data:
+                self.failures = int(data.get(b"failures", 0))
+                self.successes = int(data.get(b"successes", 0))
+                last_fail = data.get(b"last_failure_time")
+                self.last_failure_time = float(last_fail) if last_fail else None
+                self.state = data.get(b"state", b"closed").decode()
+        except Exception:
+            logger.warning("[RedisCircuitBreaker] Failed to load state from Redis", exc_info=True)
+
+    def _save_to_redis(self):
+        if not self._redis or not self._redis_key:
+            return
+        try:
+            self._redis.hset(self._redis_key, mapping={
+                "failures": self.failures,
+                "successes": self.successes,
+                "last_failure_time": self.last_failure_time or "",
+                "state": self.state,
+            })
+        except Exception:
+            logger.warning("[RedisCircuitBreaker] Failed to save state to Redis", exc_info=True)
+
+    def record_success(self):
+        super().record_success()
+        self._save_to_redis()
+
+    def record_failure(self):
+        super().record_failure()
+        self._save_to_redis()
+
+    def _open(self):
+        super()._open()
+        self._save_to_redis()
+
+    def _reset(self):
+        super()._reset()
+        self._save_to_redis()
+
+
 class ToolCircuitBreaker:
     """工具级别熔断器管理"""
 
-    def __init__(self):
+    def __init__(self, redis_client=None):
+        self._redis = redis_client
         self._breakers: dict[str, CircuitBreaker] = {}
 
     def get_breaker(self, tool_name: str) -> CircuitBreaker:
         if tool_name not in self._breakers:
-            self._breakers[tool_name] = CircuitBreaker()
+            if self._redis:
+                self._breakers[tool_name] = RedisCircuitBreaker(
+                    redis_client=self._redis, key=f"cb:{tool_name}"
+                )
+            else:
+                self._breakers[tool_name] = CircuitBreaker()
         return self._breakers[tool_name]
 
     def record_success(self, tool_name: str):
@@ -176,6 +241,20 @@ class ToolCircuitBreaker:
             breaker._reset()
 
 
+def _create_redis_client(redis_url: str):
+    if not REDIS_AVAILABLE:
+        logger.warning("[RateLimiter] redis package not installed, install with: pip install langgraph-agent[reliability]")
+        return None
+    try:
+        client = redis_module.from_url(redis_url, decode_responses=False)
+        client.ping()
+        logger.info(f"[RateLimiter] Connected to Redis at {redis_url}")
+        return client
+    except Exception:
+        logger.warning(f"[RateLimiter] Failed to connect to Redis at {redis_url}", exc_info=True)
+        return None
+
+
 _rate_limiter: Optional[RateLimiter] = None
 _tool_breakers: Optional[ToolCircuitBreaker] = None
 
@@ -187,8 +266,9 @@ def get_rate_limiter() -> RateLimiter:
     return _rate_limiter
 
 
-def get_tool_breakers() -> ToolCircuitBreaker:
+def get_tool_breakers(redis_url: str = "") -> ToolCircuitBreaker:
     global _tool_breakers
     if _tool_breakers is None:
-        _tool_breakers = ToolCircuitBreaker()
+        redis_client = _create_redis_client(redis_url) if redis_url else None
+        _tool_breakers = ToolCircuitBreaker(redis_client=redis_client)
     return _tool_breakers

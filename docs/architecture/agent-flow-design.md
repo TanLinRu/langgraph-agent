@@ -246,9 +246,9 @@ init → inject_profile → sop_resume → think ──→ execute ──→ hum
 | **API 错误中间件** | 未规定 | `server.py` `@app.exception_handler(StructuredAgentError)` → JSONResponse | ✅ 已实现 |
 | **幂等键持久化** | 未规定 | `_node_execute` 查 `load_tool_result(thread_id, tool_call_id)` 跨会话去重 | ✅ 已实现 |
 | `max_iterations` | 设计缺失 | ✅ **已修复**：`_should_continue` 新增 `step_count >= max_iterations` 检查 | ✅ 已对齐 |
-| `early_stopping_method` | 设计缺失 | 无实现 | ⚠️ 均缺失 |
-| Final Answer 检测 | 设计缺失 | 无实现 | ⚠️ 均缺失 |
-| 连续同质调用检测 | 设计缺失 | 无实现 | ⚠️ 均缺失 |
-| 熔断器持久化 | 设计暗示可持久化 | 仅内存态 `[TODO: Redis]` | ⚠️ 已知限制 |
-| 重试前预算校验 | 设计写入但未实现 | **已标注已知限制** | ⚠️ 均缺失 |
+| `early_stopping_method` | 设计缺失 | `agent.py:_should_continue → _detect_early_stopping()` 连续 3 条相同回复 | ✅ 已对齐 |
+| Final Answer 检测 | 设计缺失 | `agent.py:_should_continue → _detect_final_answer()` 中/英结束标记 | ✅ 已对齐 |
+| 连续同质调用检测 | 设计缺失 | `agent.py:_should_continue → _detect_homogeneous_tool_calls()` 同名同参数连调 3 次 | ✅ 已对齐 |
+| 熔断器持久化 | 设计暗示可持久化 | `rate_limiter.py:RedisCircuitBreaker` + `RedisToolCircuitBreaker` — 可选 Redis 持久化（需 `pip install langgraph-agent[reliability]`） | ✅ 已对齐 |
+| 重试前预算校验 | 设计写入但未实现 | `agent.py:_node_think:539` + `_node_execute:767` 预检查; 阈值来自 `AgentConfig.short_term.retry_budget_limit` | ✅ 已对齐 |
 | token 硬截断 | 设计"超窗口触发截断" | 实际软触发压缩 | ✅ 更优实现 |

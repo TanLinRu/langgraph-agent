@@ -181,6 +181,10 @@ class Agent:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._checkpointer_conn = sqlite3.connect(db_path, check_same_thread=False)
         self.checkpointer = SqliteSaver(self._checkpointer_conn)
+
+        redis_url = self.config.long_term.redis_url
+        if redis_url:
+            get_tool_breakers(redis_url=redis_url)
         self._graph = None
 
         self._metrics = {
@@ -539,7 +543,7 @@ Status: {sop_state.get('status')}
         # Budget pre-check: refuse retry if cost already exceeds budget
         total_cost = self._metrics.get("total_cost", 0)
         estimated_retry_cost = 0.002 * (max_retries + 1)
-        max_budget = 0.10
+        max_budget = self.config.short_term.retry_budget_limit
         remaining = max_budget - total_cost
         if remaining < estimated_retry_cost:
             raise StructuredAgentError(
@@ -767,7 +771,7 @@ Status: {sop_state.get('status')}
                     # Budget pre-check: refuse tool retry if cost too high
                     total_cost = self._metrics.get("total_cost", 0)
                     estimated_tool_retry_cost = 0.0005 * (max_retries + 1)
-                    max_budget = 0.10
+                    max_budget = self.config.short_term.retry_budget_limit
                     if total_cost + estimated_tool_retry_cost > max_budget:
                         results.append({
                             "role": "tool",

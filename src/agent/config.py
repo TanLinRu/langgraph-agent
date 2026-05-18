@@ -12,6 +12,7 @@ class ShortTermConfig(BaseModel):
     preserve_system: bool = True
     max_steps: int = 50
     max_iterations: int = 50
+    retry_budget_limit: float = 0.10
     model_config = ConfigDict(extra="ignore")
 
 
@@ -22,6 +23,7 @@ class LongTermConfig(BaseModel):
     vector_enabled: bool = True
     vector_dimension: int = 1536
     chroma_persist_dir: str = "./memory/chroma"
+    redis_url: str = ""
     model_config = ConfigDict(extra="ignore")
 
 
