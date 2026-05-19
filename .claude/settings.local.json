@@ -13,7 +13,17 @@
       "Bash(python *)",
       "mcp__plugin_everything-claude-code_github__search_code",
       "mcp__plugin_everything-claude-code_github__get_file_contents",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Skill(everything-claude-code:plan)",
+      "Skill(deep-research)",
+      "Skill(save-session)",
+      "Bash(copy *)",
+      "Bash(sed -i '217,265d' src/agent/context/compression.py)",
+      "Bash(sed -i '216r /tmp/tmp_enrich.txt' src/agent/context/compression.py)",
+      "Bash(sed -i '317,354d' src/agent/context/compression.py)",
+      "Bash(sed -i '316r /tmp/tmp_summarize.txt' src/agent/context/compression.py)",
+      "Bash(sed -i '30,50d' src/agent/state.py)",
+      "Bash(sed -i '29r /tmp/tmp_token_reducer_fix.txt' src/agent/state.py)"
     ]
   }
 }
