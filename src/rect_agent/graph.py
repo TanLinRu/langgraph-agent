@@ -10,12 +10,14 @@ LangGraph Studio 兼容图定义
 LangGraph Studio 可视化入口
 """
 import os
+import sqlite3
 import logging
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 from src.agent.config import DEFAULT_CONFIG
@@ -60,14 +62,22 @@ tool_node = build_tool_node()
 prompt_fn = build_prompt_fn(long_term=long_term)
 pre_hook = build_pre_model_hook(long_term=long_term, compressor=compressor)
 
+checkpointer = SqliteSaver(
+    sqlite3.connect("memory/rect_sessions.db", check_same_thread=False)
+)
+
 agent = create_react_agent(
     model=llm,
     tools=tool_node,
     prompt=prompt_fn,
     pre_model_hook=pre_hook,
     state_schema=RectAgentState,
+    checkpointer=checkpointer,
     version="v2",
     name="rect_agent_studio",
 )
 
-graph = agent.compile()
+try:
+    graph = agent.compile()
+except AttributeError:
+    graph = agent

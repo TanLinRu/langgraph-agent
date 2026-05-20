@@ -1,6 +1,8 @@
 # LangGraph Agent
 
 > 生产级代码开发与数据处理 Agent，支持多 Agent 编排、SOP 流程、产品/运营场景
+>
+> 包含两套 Agent 实现：**Legacy Agent** (`src/agent/` — 9-node StateGraph) 和 **ReAct Agent** (`src/rect_agent/` — `create_react_agent`，推荐用于新场景)
 
 ## 快速开始
 
@@ -12,11 +14,9 @@ pip install -e .
 cp .env.example .env
 # 编辑 .env 填入 OPENAI_API_KEY
 
-# CLI 运行
+# Legacy Agent CLI
 python -m src.agent.main --input "写一个快速排序"
 python -m src.agent.main --interactive
-python -m src.agent.main --archive        # 归档清理
-python -m src.agent.main --acp        # ACP 服务模式
 
 # API 服务 (Terminal 1)
 python server.py
@@ -179,6 +179,146 @@ init → sop_resume → think
 | **execute** | 工具调用执行 | `TOOLS` registry |
 | **compress** | 上下文压缩（70% 阈值） | `ContextCompressor.compress` |
 | **save** | 会话持久化（SQLite + JSONL delta） | `LongTermManager.save_session` |
+
+---
+
+## ReAct Agent (`src/rect_agent/`)
+
+基于 LangGraph `create_react_agent` 的标准化 Agent 实现，与 Legacy Agent 共享相同的基础设施（tools、config、context），但采用官方推荐架构。
+
+### 架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    RectAgent                                  │
+├─────────────────────────────────────────────────────────────┤
+│  RectAgent(Generic[OutputT])                                 │
+│  ├── _build_llm_with_breaker()  ← Breaker + Retry 包装      │
+│  ├── _build_graph()             ← create_react_agent 组装    │
+│  ├── compile(checkpointer)      ← 延迟编译                   │
+│  ├── invoke(input) → OutputT    ← 带 output_type 校验        │
+│  └── stream(input)              ← SSE 兼容流                 │
+└───────────────┬─────────────────────────────────────────────┘
+                │
+┌───────────────▼─────────────────────────────────────────────┐
+│              LangGraph create_react_agent                     │
+├─────────────────────────────────────────────────────────────┤
+│  model=_BreakerWrapper (breaker+retry)                       │
+│  tools=ToolNode(TOOLS, wrap_tool_call=production_tool_wrap) │
+│  prompt=build_prompt_fn()  ← 动态 system prompt              │
+│  pre_model_hook           ← 限流/熔断/压缩/记忆检索           │
+│  post_model_hook          ← HITL/追踪/审计/持久化/早停        │
+│  checkpointer=SqliteSaver  ← 会话持久化                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Hooks 管道
+
+```
+用户输入
+    │
+    ▼
+┌──────────────────────┐
+│  prompt_fn            │  ← 注入 SystemPrompt + Skills + Profile + SOP
+└─────────┬────────────┘
+          ▼
+┌──────────────────────┐
+│  pre_model_hook       │  ← ① 限流检查  ② 熔断检查  ③ 健康检查(降级)
+│                       │  ← ④ 压缩≥70% ⑤ 记忆检索
+└─────────┬────────────┘
+          ▼
+┌──────────────────────┐
+│  model(LLM)           │  ← _BreakerWrapper: breaker→with_retry×4
+└─────────┬────────────┘
+          ▼
+┌──────────────────────┐
+│  post_model_hook      │  ← ① HITL(interrupt) ② 成本追踪 ③ 审计日志
+│                       │  ← ④ 早停检测  ⑤ 会话持久化
+└─────────┬────────────┘
+          ▼
+    [tool_calls?]
+     ┌────┴────┐
+     │         │
+    END     ToolNode
+              │
+              ▼
+        production_tool_wrapper (per-call)
+          ├── idempotency cache (memory → SQLite)
+          ├── breaker check
+          ├── budget check
+          └── retry loop ×4
+```
+
+### 生产可靠性特性
+
+| 特性 | 实现 | 触发条件 |
+|------|------|----------|
+| **限流** | `RateLimiter.check_limit()` | RPM 超限 → 抛 `LLM_RATE_LIMIT` |
+| **熔断** | `ToolCircuitBreaker` (×5 失败) | 连续失败 → 跳过工具返回 error |
+| **降级** | `ServiceHealthChecker.is_healthy()` | LLM 不可用 → 返回降级响应 |
+| **LLM 重试** | `with_retry(stop_after_attempt=4)` | 仅 `TimeoutError`/`ConnectionError` |
+| **工具重试** | `production_tool_wrapper` (×4) | 可重试错误，指数退避 |
+| **预算校验** | `check_cost_limit()` | 预算不足 → 跳过工具不执行 |
+| **HITL** | `interrupt()` | 关键工具 (`CRITICAL_TOOLS`) |
+| **审计日志** | `audit_log_error()` | 每次 LLM 调用 → JSONL 记录 |
+| **幂等** | 内存 + SQLite 双缓存 | 同 tool_call_id 跳过重复 |
+| **早停** | Final Answer / 同质调用 / 最大步数 | 检测到结束标记 → 停止循环 |
+
+### RectContext 依赖注入
+
+```python
+@dataclass
+class RectContext:
+    rate_limiter: RateLimiter          # 全局单例
+    tool_breakers: ToolCircuitBreaker   # 按工具隔离
+    config: AgentConfig | None          # 配置
+    health_checker: ServiceHealthChecker | None  # 健康检查
+
+# 通过 build_tool_node(ctx=RectContext()) 注入
+# ctx=None 时自动 fallback 到全局函数
+```
+
+### 与 Legacy Agent 对比
+
+| 维度 | Legacy Agent (`src/agent/`) | ReAct Agent (`src/rect_agent/`) |
+|------|---------------------------|-------------------------------|
+| **架构** | 自定义 9-node StateGraph | LangGraph `create_react_agent` |
+| **LLM 重试** | 无 | `with_retry(×4, 仅 TimeoutError)` |
+| **输出校验** | 原始 dict | `Generic[OutputT]` + `model_validate_json` |
+| **trace_id** | 部分透传 | 全链路 trace_id 透传 |
+| **降级** | 无 | `ServiceHealthChecker` |
+| **审计** | 无 | `audit_log_error` JSONL |
+| **预算校验** | 无 | `check_cost_limit` 重试前 |
+| **依赖注入** | 全局变量 | `RectContext` dataclass |
+| **工具封装** | 函数式包装 | `RectTool` dataclass (新增) |
+| **MemoryManager** | 分散调用 | 统一 L1-L4 接口 (新增) |
+| **SQLite 幂等** | 仅内存 | 内存 + SQLite 双缓存 |
+| **早停检测** | 无 | Final Answer / 同质调用检测 |
+| **checkpointer** | `graph.py` 无 | `SqliteSaver(rect_sessions.db)` |
+
+### 文件结构
+
+```
+src/rect_agent/
+├── __init__.py              # 导出 RectAgent, create_rect_agent, OutputT
+├── agent.py                 # RectAgent 主类, Generic[OutputT], _BreakerWrapper
+├── config.py                # 复用 src.agent.config
+├── graph.py                 # LangGraph Studio 入口 (带 checkpointer)
+├── state.py                 # RectAgentState + add_messages reducer
+├── shared.py                # CRITICAL_TOOLS, check_critical_tools (防循环导入)
+├── memory_manager.py        # MemoryManager 统一 L1-L4 同步接口
+├── tools/
+│   ├── __init__.py          # TOOLS 列表
+│   └── wrapper.py           # build_tool_node(RectContext)
+├── hooks/
+│   ├── prompt.py            # build_prompt_fn (SystemPrompt+Skills+Profile)
+│   ├── pre_model.py         # 限流/熔断/降级/压缩/记忆检索
+│   └── post_model.py        # HITL/成本/审计/早停/持久化
+└── middleware/
+    ├── context.py           # RectContext dataclass
+    ├── tool_wrapper.py      # production_tool_wrapper (重试/熔断/幂等/预算)
+    └── rect_tool.py         # RectTool dataclass (参数校验+HITL+重试)
+```
 
 ## 数据流
 
@@ -544,7 +684,7 @@ def test_llm_summarize_real_api():
 
 ```
 langgraph-agent/
-├── src/agent/              # 核心代码
+├── src/agent/              # Legacy Agent (9-node StateGraph)
 │   ├── agent.py           # Agent 主类
 │   ├── registry.py       # Agent/Graph 注册
 │   ├── supervisor.py    # 多 Agent 编排
@@ -562,6 +702,23 @@ langgraph-agent/
 │   ├── tools/        # 工具集
 │   ├── prompts/      # 系统提示
 │   └── metrics*.py  # 指标收集
+├── src/rect_agent/          # ReAct Agent (create_react_agent)
+│   ├── __init__.py         # RectAgent, create_rect_agent
+│   ├── agent.py            # RectAgent 主类 + _BreakerWrapper
+│   ├── graph.py            # LangGraph Studio 入口
+│   ├── state.py            # RectAgentState
+│   ├── shared.py           # CRITICAL_TOOLS (防循环导入)
+│   ├── memory_manager.py   # MemoryManager L1-L4
+│   ├── tools/
+│   │   └── wrapper.py     # ToolNode + RectContext 注入
+│   ├── hooks/
+│   │   ├── prompt.py      # 动态 SystemPrompt
+│   │   ├── pre_model.py   # 限流/熔断/降级/压缩/检索
+│   │   └── post_model.py  # HITL/审计/早停/持久化
+│   └── middleware/
+│       ├── context.py     # RectContext dataclass
+│       ├── tool_wrapper.py # 重试/熔断/幂等/预算
+│       └── rect_tool.py   # RectTool dataclass
 ├── ui/                # Vue 3 前端
 ├── server.py           # FastAPI 后端
 ├── workflows.json     # Workflow 模板
@@ -571,46 +728,63 @@ langgraph-agent/
 │   ├── memory/        # MEMORY.md
 │   ├── chroma/        # 向量数据库
 │   └── archive/       # 归档
-├── tests/            # pytest (17+ tests)
+├── tests/            # pytest (30+ tests)
 │   ├── conftest.py              # Mock/Real API fixtures
-│   ├── test_compression.py      # 压缩测试
-│   ├── test_context_integration.py  # 集成测试
-│   ├── test_multi_turn_real.py   # 多轮对话测试
-│   ├── test_tool_results.py      # 工具结果格式测试
+│   ├── test_rect_agent.py       # rect-agent 专项测试 (18 tests)
+│   ├── test_rate_limiter.py     # 限流/熔断测试
+│   ├── test_config.py           # 配置测试
 │   └── ...
 └── docs/            # 文档
 ```
 
 ## 核心特性
 
-### 1. 幂等工具执行
-- `_idempotent_cache` 缓存同轮次工具结果
-- 防止重复执行相同的 tool_calls
-- LRU 淘汰策略 (最大 1000 条)
+### 1. 双 Agent 架构
+- **Legacy Agent** (`src/agent/`): 自定义 9-node StateGraph，成熟稳定
+- **ReAct Agent** (`src/rect_agent/`): 基于 LangGraph `create_react_agent`，官方推荐
+- 共享基础设施（tools、config、context），零侵入迁移
 
-### 2. 结构化工具返回
+### 2. 幂等工具执行
+- 内存 + SQLite 双缓存 (`tool_wrapper.py`)
+- 防止重复执行相同的 `tool_calls`
+- 跨会话持久化（`LongTermManager.load_tool_result`）
+
+### 3. 结构化工具返回
 - 所有工具返回 `ToolResult.to_dict()`
 - 包含 `status`, `content`, `metadata`, `error`
 - 统一错误处理 (`ErrorEnvelope`)
 - 工具元数据可传递附加信息
 
-### 3. 多 Agent 编排
+### 4. 全链路可靠性
+| 防御层 | 实现 | 效果 |
+|--------|------|------|
+| **限流** | `RateLimiter.check_limit()` | RPM 超限直接拒绝 |
+| **熔断** | `ToolCircuitBreaker` (×5) | 连续失败隔离故障 |
+| **降级** | `ServiceHealthChecker` | LLM 不可用返回降级响应 |
+| **LLM 重试** | `with_retry(×4, only TimeoutError/ConnectionError)` | 瞬态故障自动恢复 |
+| **工具重试** | `production_tool_wrapper` (×4) | 可重试错误指数退避 |
+| **预算校验** | `check_cost_limit()` | 重试前检查，防止成本失控 |
+| **HITL** | `interrupt()` 系统级 + `RectTool` 工具级 | 关键操作人工审批 |
+| **审计** | `audit_log_error` → JSONL | 全量调用可追溯 |
+| **早停** | Final Answer / 同质调用 / 最大步数 | 节省 Token |
+
+### 5. 多 Agent 编排
 - SupervisorManager 调度多个 Agent
 - 支持同步/异步执行模式
 - 执行状态实时推送 (SSE)
 
-### 2. 上下文管理
+### 6. 上下文管理
 - **压缩**: 70% token 阈值触发，LLM 摘要
 - **长期记忆**: SQLite + ChromaDB
 - **归档**: 7 天自动清理
 - **Hot Zone**: LRU + 热度双因素淘汰
 
-### 3. SOP 流程
+### 7. SOP 流程
 - 状态持久化
 - 步骤恢复
 - 多模板支持
 
-### 4. 产品/运营场景
+### 8. 产品/运营场景
 - 客服工单处理 Workflow
 - CRM 客户跟进 Workflow
 - 数据分析报表 Workflow

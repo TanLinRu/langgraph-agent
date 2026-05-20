@@ -4,13 +4,51 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+from src.agent.audit_logger import log_error as audit_log_error
 from src.agent.context.long_term import LongTermManager
 from src.agent.rate_limiter import get_rate_limiter
+from src.rect_agent.shared import CRITICAL_TOOLS, check_critical_tools as _check_critical_tools
 
 logger = logging.getLogger(__name__)
 
-CRITICAL_TOOLS = {"execute_code", "write_file", "bash", "code_execution", "write_operation", "resource_access", "file_write", "file_read"}
 _MODEL_COSTS = {"gpt-4": {"input": 0.03, "output": 0.06}, "gpt-4o": {"input": 0.01, "output": 0.03}}
+
+FINAL_ANSWER_MARKERS = {
+    "zh": ["最终答案", "综上所述", "总结"],
+    "en": ["final answer", "in summary", "to summarize"],
+}
+
+
+def _detect_final_answer(messages: list) -> bool:
+    if not messages:
+        return False
+    last = messages[-1]
+    content = getattr(last, "content", "") or (last.get("content", "") if isinstance(last, dict) else "")
+    if not content:
+        return False
+    lower = content.lower()
+    for markers in FINAL_ANSWER_MARKERS.values():
+        for marker in markers:
+            if marker.lower() in lower:
+                return True
+    return False
+
+
+def _detect_homogeneous_tool_calls(messages: list) -> bool:
+    recent = []
+    for m in reversed(messages[-10:]):
+        tcs = getattr(m, "tool_calls", None)
+        if not tcs and isinstance(m, dict):
+            tcs = m.get("tool_calls")
+        if tcs:
+            for tc in tcs:
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+                recent.append((name, str(args)))
+    if len(recent) >= 3:
+        last3 = recent[-3:]
+        return len(set(t[0] for t in last3)) == 1 and len(set(t[1] for t in last3)) == 1
+    return False
 
 
 def _estimate_cost(messages: list, model: str = "gpt-4o") -> float:
@@ -22,27 +60,6 @@ def _estimate_cost(messages: list, model: str = "gpt-4o") -> float:
         rate = rates.get("output", 0.03) if mtype == "ai" else rates.get("input", 0.01)
         total += tokens * rate / 1000
     return total
-
-
-def _check_critical_tools(state: dict) -> list[str]:
-    messages = state.get("messages", [])
-    if not messages:
-        return []
-    last = messages[-1]
-    if hasattr(last, "tool_calls"):
-        tool_calls = last.tool_calls
-    elif isinstance(last, dict):
-        tool_calls = last.get("tool_calls")
-    else:
-        tool_calls = None
-    if not tool_calls:
-        return []
-    critical = []
-    for tc in tool_calls:
-        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
-        if name in CRITICAL_TOOLS:
-            critical.append(name)
-    return critical
 
 
 def build_post_model_hook(long_term: LongTermManager | None = None):
@@ -68,6 +85,21 @@ def build_post_model_hook(long_term: LongTermManager | None = None):
             "current_action": "",
         }
 
+        if _detect_final_answer(messages):
+            updates["task_status"] = "completed"
+            updates["current_action"] = "early_stop:final_answer"
+            logger.info("[PostModel] Early stop triggered by Final Answer")
+
+        if _detect_homogeneous_tool_calls(messages):
+            updates["task_status"] = "completed"
+            updates["current_action"] = "early_stop:homogeneous_loop"
+            logger.info("[PostModel] Early stop triggered by homogeneous tool calls")
+
+        if state.get("step_count", 0) >= 25:
+            updates["task_status"] = "completed"
+            updates["current_action"] = "early_stop:max_steps"
+            logger.info("[PostModel] Early stop triggered by max steps")
+
         cost = _estimate_cost(messages)
         if cost > 0:
             get_rate_limiter().add_cost(cost)
@@ -76,6 +108,22 @@ def build_post_model_hook(long_term: LongTermManager | None = None):
                 "messages": old_usage.get("messages", 0) + (len(str(getattr(messages[-1], "content", "") or "")) // 4 if messages else 0),
                 "cost": old_usage.get("cost", 0) + cost,
             }
+
+        try:
+            tool_names = []
+            if messages:
+                last = messages[-1]
+                tcs = getattr(last, "tool_calls", None)
+                if tcs:
+                    tool_names = [t.get("name") for t in (tcs if isinstance(tcs, list) else [])]
+            audit_log_error(
+                error={"error_code": "LLM_CALL", "error_type": "RECOVERABLE", "retryable": False},
+                trace_id=state.get("trace_id", ""),
+                thread_id=state.get("thread_id", ""),
+                context={"step": step_count + 1, "tool_calls": tool_names, "status": "completed"},
+            )
+        except Exception:
+            logger.warning("[PostModel] Audit log failed", exc_info=True)
 
         if long_term:
             try:

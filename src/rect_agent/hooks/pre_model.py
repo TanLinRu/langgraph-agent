@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 def build_pre_model_hook(
     long_term: LongTermManager | None = None,
     compressor: ContextCompressor | None = None,
+    health_checker: Any = None,
 ):
     def pre_model_hook(state: dict) -> dict:
         rate_limiter = get_rate_limiter()
@@ -26,6 +27,12 @@ def build_pre_model_hook(
                 error_level=ErrorLevel.HIGH,
                 trace_id=state.get("trace_id", ""),
             )
+
+        if health_checker and not health_checker.is_healthy("llm"):
+            return {
+                "messages": [{"role": "assistant", "content": "[System degraded] LLM 服务不可用，跳过推理"}],
+                "task_status": "degraded",
+            }
 
         llm_breaker = get_tool_breakers().get_breaker("_llm")
         if not llm_breaker.can_execute():
